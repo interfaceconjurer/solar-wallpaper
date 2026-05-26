@@ -1,0 +1,9 @@
+__pycache__/
+*.pyc
+config.json
+solar_wallpaper.log
+frames/
+frame_comparison/
+transitions/
+crossfade_overlay
+crossfade_cycle
