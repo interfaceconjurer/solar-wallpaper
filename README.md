@@ -3,7 +3,7 @@
 A macOS dynamic wallpaper system that automatically transitions between Lake Tahoe aerial wallpapers based on the sun's position in the sky. Instead of abrupt switches, it performs smooth 30-minute crossfade transitions using a Core Animation overlay at the desktop window level.
 
 <p align="center">
-  <img src="screenshots/transition-cycle.gif" alt="Transition cycle — morning, day, evening, night" />
+  <img src="screenshots/transition-cycle.png" alt="Transition cycle — morning, day, evening, night" />
 </p>
 
 ## How It Works
