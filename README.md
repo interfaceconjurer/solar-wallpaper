@@ -6,6 +6,10 @@ A macOS dynamic wallpaper system that automatically transitions between Lake Tah
   <img src="screenshots/transition-cycle.png" alt="Transition cycle — morning, day, evening, night" />
 </p>
 
+<p align="center">
+  <img src="screenshots/periods.png" alt="Morning, Day, Evening, Night" />
+</p>
+
 ## How It Works
 
 A launch agent runs the script at specific transition times rather than polling. Each day, the schedule is:
