@@ -1,7 +1,18 @@
 #!/usr/bin/env python3
 """
 Switches macOS wallpaper between Tahoe Morning/Day/Evening/Night
-based on the sun's position in the sky, with smooth crossfade transitions.
+with smooth crossfade transitions.
+
+Transitions:
+  night → morning:  sunrise (calculated daily)
+  morning → day:    12:00
+  day → evening:    19:00
+  evening → night:  23:00
+
+Usage:
+  solar_wallpaper.py                  # Transition to the correct period for right now
+  solar_wallpaper.py --hard-switch X  # Immediately switch to period X
+  solar_wallpaper.py --schedule       # Calculate sunrise, write launchd schedule
 """
 
 import datetime
@@ -23,6 +34,9 @@ VIDEOS_DIR = os.path.expanduser(
 )
 FRAMES_DIR = os.path.join(SCRIPT_DIR, "frames")
 CROSSFADE_BIN = os.path.join(SCRIPT_DIR, "crossfade_overlay")
+LAUNCHD_PLIST = os.path.expanduser(
+    "~/Library/LaunchAgents/com.jwright.solar-wallpaper.plist"
+)
 
 WALLPAPERS = {
     "morning": "B2FC91ED-6891-4DEB-85A1-268B2B4160B6",
@@ -92,6 +106,34 @@ def solar_elevation(lat, lon, dt=None):
     return math.degrees(elevation)
 
 
+def calculate_sunrise(lat, lon, date=None):
+    """Calculate civil twilight (solar elevation = -6°) for the given date.
+    Returns a local datetime for when the sun crosses -6° on the way up."""
+    if date is None:
+        date = datetime.date.today()
+
+    # Search minute-by-minute from midnight to noon for the -6° crossing
+    local_midnight = datetime.datetime(date.year, date.month, date.day, 0, 0, 0)
+    tz_offset = datetime.datetime.now() - datetime.datetime.utcnow()
+
+    prev_elev = None
+    for minute in range(0, 720):  # midnight to noon
+        local_time = local_midnight + datetime.timedelta(minutes=minute)
+        utc_time = (local_time - tz_offset).replace(tzinfo=datetime.timezone.utc)
+        elev = solar_elevation(lat, lon, utc_time)
+
+        if prev_elev is not None and prev_elev < -6 and elev >= -6:
+            # Interpolate to get more precise time
+            fraction = (-6 - prev_elev) / (elev - prev_elev)
+            sunrise_time = local_midnight + datetime.timedelta(minutes=minute - 1 + fraction)
+            return sunrise_time
+
+        prev_elev = elev
+
+    # Fallback: sun doesn't cross -6° (polar regions), use 6am
+    return local_midnight.replace(hour=6)
+
+
 def get_period(lat, lon):
     now_utc = datetime.datetime.now(datetime.timezone.utc)
     local_hour = datetime.datetime.now().hour
@@ -121,7 +163,6 @@ def get_current_asset_id():
 
 
 def ensure_frame(period):
-    """Extract and cache a frame from the given period's video at t=0."""
     os.makedirs(FRAMES_DIR, exist_ok=True)
     frame_path = os.path.join(FRAMES_DIR, f"{period}.png")
 
@@ -148,7 +189,6 @@ def ensure_frame(period):
 
 
 def hard_switch(period):
-    """Switch wallpaper immediately without transition."""
     asset_id = WALLPAPERS[period]
 
     with open(STORE_PATH, "rb") as f:
@@ -170,7 +210,6 @@ def hard_switch(period):
 
 
 def crossfade_transition(from_period, to_period):
-    """Perform a smooth crossfade transition between two wallpaper periods."""
     from_frame = ensure_frame(from_period)
     to_frame = ensure_frame(to_period)
 
@@ -195,6 +234,47 @@ def crossfade_transition(from_period, to_period):
     ])
 
 
+def write_schedule():
+    """Calculate today's sunrise and write the launchd plist with all transition times."""
+    lat, lon = get_location()
+    sunrise = calculate_sunrise(lat, lon)
+    sunrise_hour = sunrise.hour
+    sunrise_minute = sunrise.minute
+
+    print(f"Today's sunrise (civil twilight): {sunrise.strftime('%H:%M')}")
+    print(f"Schedule:")
+    print(f"  {sunrise_hour:02d}:{sunrise_minute:02d} → morning")
+    print(f"  12:00 → day")
+    print(f"  19:00 → evening")
+    print(f"  23:00 → night")
+    print(f"  03:00 → recalculate schedule")
+
+    script_path = os.path.abspath(__file__)
+
+    plist = {
+        "Label": "com.jwright.solar-wallpaper",
+        "ProgramArguments": ["/usr/bin/python3", script_path],
+        "StartCalendarInterval": [
+            {"Hour": sunrise_hour, "Minute": sunrise_minute},  # morning
+            {"Hour": 12, "Minute": 0},   # day
+            {"Hour": 19, "Minute": 0},   # evening
+            {"Hour": 23, "Minute": 0},   # night
+            {"Hour": 3, "Minute": 0},    # recalculate sunrise for tomorrow
+        ],
+        "RunAtLoad": True,
+        "StandardOutPath": os.path.join(SCRIPT_DIR, "solar_wallpaper.log"),
+        "StandardErrorPath": os.path.join(SCRIPT_DIR, "solar_wallpaper.log"),
+    }
+
+    with open(LAUNCHD_PLIST, "wb") as f:
+        plistlib.dump(plist, f)
+
+    # Reload the agent
+    subprocess.run(["launchctl", "unload", LAUNCHD_PLIST], capture_output=True)
+    subprocess.run(["launchctl", "load", LAUNCHD_PLIST], capture_output=True)
+    print(f"\nLaunch agent updated and reloaded.")
+
+
 def main():
     if "--hard-switch" in sys.argv:
         idx = sys.argv.index("--hard-switch")
@@ -206,6 +286,16 @@ def main():
             else:
                 print(f"Unknown period: {period}", file=sys.stderr)
                 sys.exit(1)
+        return
+
+    if "--schedule" in sys.argv:
+        write_schedule()
+        return
+
+    # At 3am, recalculate the schedule for today's sunrise
+    now = datetime.datetime.now()
+    if now.hour == 3 and now.minute < 5:
+        write_schedule()
         return
 
     lat, lon = get_location()

@@ -8,12 +8,22 @@ A macOS dynamic wallpaper system that automatically transitions between Lake Tah
 
 ## How It Works
 
-1. A launch agent runs the script every 5 minutes
-2. Solar elevation is calculated for your location to determine the current period (morning, day, evening, night)
-3. If the wallpaper needs to change, a compiled Swift overlay appears at the desktop window level
-4. The overlay crossfades between the current and target period over 30 minutes using GPU-accelerated Core Animation
-5. At the midpoint of the fade, the actual macOS wallpaper asset is switched underneath
-6. The overlay fades out, revealing the real wallpaper seamlessly
+A launch agent runs the script at specific transition times rather than polling. Each day, the schedule is:
+
+| Time | Transition |
+|------|-----------|
+| 3:00am | Recalculates sunrise for the new day and updates the schedule |
+| Sunrise | night → morning (calculated daily based on location) |
+| 12:00pm | morning → day |
+| 7:00pm | day → evening |
+| 11:00pm | evening → night |
+
+When a transition triggers:
+
+1. A compiled Swift overlay appears at the desktop window level
+2. The overlay crossfades between the current and target period over 30 minutes using GPU-accelerated Core Animation
+3. At the midpoint, the actual macOS wallpaper asset is switched underneath
+4. The overlay fades out, revealing the real wallpaper seamlessly
 
 All four Tahoe videos share an identical slow camera pan — only the lighting differs. The transition extracts frames at the same timestamp (t=0) so the composition stays perfectly aligned during crossfade.
 
@@ -39,9 +49,8 @@ swiftc -O -o crossfade_cycle crossfade_cycle.swift -framework Cocoa -framework Q
 # Run once to extract frames and cache them
 python3 solar_wallpaper.py
 
-# Install launch agent
-cp com.jwright.solar-wallpaper.plist ~/Library/LaunchAgents/
-launchctl load ~/Library/LaunchAgents/com.jwright.solar-wallpaper.plist
+# Calculate sunrise and install the launch agent schedule
+python3 solar_wallpaper.py --schedule
 ```
 
 ### Configuration
@@ -55,14 +64,18 @@ Location is auto-detected on first run and cached in `config.json`. To set it ma
 }
 ```
 
-### Period Schedule
+### Commands
 
-| Period  | Condition |
-|---------|-----------|
-| Morning | Sunrise (solar elevation ≥ -6°) until noon |
-| Day     | Noon until 7pm |
-| Evening | 7pm until 11pm |
-| Night   | 11pm until sunrise |
+```bash
+# Normal run — transitions if the period has changed
+python3 solar_wallpaper.py
+
+# Force a specific period immediately
+python3 solar_wallpaper.py --hard-switch morning
+
+# Recalculate sunrise and update the launchd schedule
+python3 solar_wallpaper.py --schedule
+```
 
 ## Files
 
