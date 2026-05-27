@@ -268,10 +268,17 @@ def write_schedule():
     with open(LAUNCHD_PLIST, "wb") as f:
         plistlib.dump(plist, f)
 
-    # Reload the agent
-    subprocess.run(["launchctl", "unload", LAUNCHD_PLIST], capture_output=True)
-    subprocess.run(["launchctl", "load", LAUNCHD_PLIST], capture_output=True)
-    print(f"\nLaunch agent updated and reloaded.")
+    # Reload via a detached process — unloading from within the running job
+    # would kill this process before the load can execute.
+    subprocess.Popen(
+        ["/bin/sh", "-c",
+         f"sleep 2 && launchctl unload '{LAUNCHD_PLIST}' 2>/dev/null; "
+         f"launchctl load '{LAUNCHD_PLIST}'"],
+        start_new_session=True,
+        stdout=subprocess.DEVNULL,
+        stderr=subprocess.DEVNULL,
+    )
+    print(f"\nLaunch agent updated (reloading in background).")
 
 
 def main():
