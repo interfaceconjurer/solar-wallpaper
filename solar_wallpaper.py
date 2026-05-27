@@ -223,14 +223,13 @@ def crossfade_transition(from_period, to_period):
         hard_switch(to_period)
         return
 
-    mid_command = f"{sys.executable} {os.path.abspath(__file__)} --hard-switch {to_period}"
+    hard_switch(to_period)
 
     subprocess.Popen([
         CROSSFADE_BIN,
         from_frame,
         to_frame,
         str(FADE_DURATION),
-        mid_command,
     ])
 
 
@@ -310,12 +309,19 @@ def main():
     current_period = ASSET_TO_PERIOD.get(current_asset)
     elev = solar_elevation(lat, lon)
 
-    if current_period:
-        print(f"Transitioning {current_period} → {period} (solar elevation: {elev:.1f}°)")
-        crossfade_transition(current_period, period)
-    else:
+    if not current_period:
         print(f"Switched to Tahoe {period.capitalize()} (solar elevation: {elev:.1f}°)")
         hard_switch(period)
+        return
+
+    sequence = ["morning", "day", "evening", "night"]
+    steps = (sequence.index(period) - sequence.index(current_period)) % 4
+    if steps != 1:
+        print(f"Catching up {current_period} → {period} ({steps} steps, skipping overlay)")
+        hard_switch(period)
+    else:
+        print(f"Transitioning {current_period} → {period} (solar elevation: {elev:.1f}°)")
+        crossfade_transition(current_period, period)
 
 
 if __name__ == "__main__":
