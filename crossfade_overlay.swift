@@ -2,8 +2,8 @@ import Cocoa
 import QuartzCore
 
 class CrossfadeOverlay: NSObject, NSApplicationDelegate {
-    var window: NSWindow!
-    var toLayer: CALayer!
+    var windows: [NSWindow] = []
+    var toLayers: [CALayer] = []
 
     let fromPath: String
     let toPath: String
@@ -18,7 +18,8 @@ class CrossfadeOverlay: NSObject, NSApplicationDelegate {
     }
 
     func applicationDidFinishLaunching(_ notification: Notification) {
-        guard let screen = NSScreen.main else {
+        let screens = NSScreen.screens
+        guard !screens.isEmpty else {
             NSApp.terminate(nil)
             return
         }
@@ -30,38 +31,42 @@ class CrossfadeOverlay: NSObject, NSApplicationDelegate {
             return
         }
 
-        let frame = screen.frame
+        for screen in screens {
+            let frame = screen.frame
 
-        window = NSWindow(
-            contentRect: frame,
-            styleMask: .borderless,
-            backing: .buffered,
-            defer: false
-        )
-        window.level = NSWindow.Level(rawValue: Int(CGWindowLevelForKey(.desktopWindow)) + 1)
-        window.isOpaque = true
-        window.backgroundColor = .black
-        window.ignoresMouseEvents = true
-        window.collectionBehavior = [.canJoinAllSpaces, .stationary]
+            let window = NSWindow(
+                contentRect: frame,
+                styleMask: .borderless,
+                backing: .buffered,
+                defer: false
+            )
+            window.level = NSWindow.Level(rawValue: Int(CGWindowLevelForKey(.desktopWindow)) + 1)
+            window.isOpaque = true
+            window.backgroundColor = .black
+            window.ignoresMouseEvents = true
+            window.collectionBehavior = [.canJoinAllSpaces, .stationary]
 
-        let contentView = NSView(frame: frame)
-        contentView.wantsLayer = true
-        window.contentView = contentView
+            let contentView = NSView(frame: NSRect(origin: .zero, size: frame.size))
+            contentView.wantsLayer = true
+            window.contentView = contentView
 
-        let fromLayer = CALayer()
-        fromLayer.frame = contentView.bounds
-        fromLayer.contents = fromImage.cgImage(forProposedRect: nil, context: nil, hints: nil)
-        fromLayer.contentsGravity = .resizeAspectFill
-        contentView.layer!.addSublayer(fromLayer)
+            let fromLayer = CALayer()
+            fromLayer.frame = contentView.bounds
+            fromLayer.contents = fromImage.cgImage(forProposedRect: nil, context: nil, hints: nil)
+            fromLayer.contentsGravity = .resizeAspectFill
+            contentView.layer!.addSublayer(fromLayer)
 
-        toLayer = CALayer()
-        toLayer.frame = contentView.bounds
-        toLayer.contents = toImage.cgImage(forProposedRect: nil, context: nil, hints: nil)
-        toLayer.contentsGravity = .resizeAspectFill
-        toLayer.opacity = 0.0
-        contentView.layer!.addSublayer(toLayer)
+            let toLayer = CALayer()
+            toLayer.frame = contentView.bounds
+            toLayer.contents = toImage.cgImage(forProposedRect: nil, context: nil, hints: nil)
+            toLayer.contentsGravity = .resizeAspectFill
+            toLayer.opacity = 0.0
+            contentView.layer!.addSublayer(toLayer)
 
-        window.orderFront(nil)
+            window.orderFront(nil)
+            windows.append(window)
+            toLayers.append(toLayer)
+        }
 
         DispatchQueue.main.asyncAfter(deadline: .now() + 0.1) {
             self.startCrossfade()
@@ -69,25 +74,27 @@ class CrossfadeOverlay: NSObject, NSApplicationDelegate {
     }
 
     func startCrossfade() {
-        let anim = CABasicAnimation(keyPath: "opacity")
-        anim.fromValue = 0.0
-        anim.toValue = 1.0
-        anim.duration = duration
-        anim.timingFunction = CAMediaTimingFunction(name: .linear)
-        anim.fillMode = .forwards
-        anim.isRemovedOnCompletion = false
+        for toLayer in toLayers {
+            let anim = CABasicAnimation(keyPath: "opacity")
+            anim.fromValue = 0.0
+            anim.toValue = 1.0
+            anim.duration = duration
+            anim.timingFunction = CAMediaTimingFunction(name: .linear)
+            anim.fillMode = .forwards
+            anim.isRemovedOnCompletion = false
+            toLayer.add(anim, forKey: "crossfade")
+        }
 
-        CATransaction.begin()
-        CATransaction.setCompletionBlock {
+        DispatchQueue.main.asyncAfter(deadline: .now() + duration + 0.1) {
             NSAnimationContext.runAnimationGroup({ context in
                 context.duration = 1.0
-                self.window.animator().alphaValue = 0.0
+                for window in self.windows {
+                    window.animator().alphaValue = 0.0
+                }
             }, completionHandler: {
                 NSApp.terminate(nil)
             })
         }
-        toLayer.add(anim, forKey: "crossfade")
-        CATransaction.commit()
 
         if let action = midAction {
             DispatchQueue.main.asyncAfter(deadline: .now() + duration / 2.0) {

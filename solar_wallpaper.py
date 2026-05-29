@@ -223,13 +223,14 @@ def crossfade_transition(from_period, to_period):
         hard_switch(to_period)
         return
 
-    hard_switch(to_period)
+    mid_command = f"{sys.executable} {os.path.abspath(__file__)} --hard-switch {to_period}"
 
     subprocess.Popen([
         CROSSFADE_BIN,
         from_frame,
         to_frame,
         str(FADE_DURATION),
+        mid_command,
     ])
 
 
