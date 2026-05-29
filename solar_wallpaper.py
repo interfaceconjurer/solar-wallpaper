@@ -188,7 +188,8 @@ def ensure_frame(period):
     return frame_path
 
 
-def hard_switch(period):
+def set_wallpaper_plist(period):
+    """Write the target period into the wallpaper plist (no visual change yet)."""
     asset_id = WALLPAPERS[period]
 
     with open(STORE_PATH, "rb") as f:
@@ -206,6 +207,9 @@ def hard_switch(period):
     with open(STORE_PATH, "wb") as f:
         plistlib.dump(data, f, fmt=plistlib.FMT_BINARY)
 
+
+def hard_switch(period):
+    set_wallpaper_plist(period)
     subprocess.run(["killall", "WallpaperAgent"], capture_output=True)
 
 
@@ -223,7 +227,14 @@ def crossfade_transition(from_period, to_period):
         hard_switch(to_period)
         return
 
-    mid_command = f"{sys.executable} {os.path.abspath(__file__)} --hard-switch {to_period}"
+    # Write the plist immediately so the wallpaper is correct even if the
+    # overlay dies. WallpaperAgent still shows the old image until killed.
+    set_wallpaper_plist(to_period)
+
+    # The overlay's mid_command kills WallpaperAgent at the midpoint, which
+    # triggers it to re-read the plist and display the new wallpaper.
+    # The overlay is covering the desktop during this, so it's seamless.
+    mid_command = "killall WallpaperAgent"
 
     subprocess.Popen([
         CROSSFADE_BIN,

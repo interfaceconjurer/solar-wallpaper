@@ -47,9 +47,9 @@ The wallpaper only actually changes when the overlay's mid_command fires. If the
 
 **Attempted fix (failed):** Hard_switch before overlay with 1s delay. The `killall WallpaperAgent` causes a visible snap even with the overlay on screen.
 
-**Working fix:** Time-based catch-up. Compare current time to the expected transition time for the target period. If more than 5 minutes late, hard_switch without overlay. Only launch the overlay if the script fires within the 5-minute window around the transition time (i.e., the scheduled trigger fired on time and the machine was awake).
+**Partial fix:** Time-based catch-up. If more than 5 minutes past the expected transition time, hard_switch without overlay. However, `launchd` can fire missed jobs immediately on wake — so the script might think it's "on time" and launch the overlay, which then dies anyway.
 
-**Result:** `RunAtLoad` on login correctly detects it's hours past sunrise and hard-switches immediately. Normal scheduled triggers still get the smooth crossfade.
+**Final fix (2026-05-29):** Decouple the plist write from the overlay entirely. `set_wallpaper_plist()` writes the target wallpaper immediately in the Python script before launching the overlay. The overlay's mid_command is now just `killall WallpaperAgent` (to refresh the display at the right moment). If the overlay dies, the plist is already correct — WallpaperAgent will show the new wallpaper on its next restart (login, wake, etc.). The time-based catch-up still hard_switches for the instant-correction case.
 
 ## Version History
 
@@ -58,4 +58,4 @@ The wallpaper only actually changes when the overlay's mid_command fires. If the
 | 2026-05-26 | Initial crossfade system — Swift overlay, t=0 frame extraction, launchd scheduling |
 | 2026-05-27 | Fix sleep catch-up (multi-step), fix agent self-unload |
 | 2026-05-28 | Multi-monitor support, revert eager hard_switch |
-| 2026-05-29 | Time-based catch-up: hard_switch if >5min past transition time |
+| 2026-05-29 | Time-based catch-up + plist-first guarantee: overlay is now purely visual |
