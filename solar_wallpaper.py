@@ -48,6 +48,7 @@ WALLPAPERS = {
 ASSET_TO_PERIOD = {v: k for k, v in WALLPAPERS.items()}
 
 FADE_DURATION = 1800.0  # 30 minutes
+CATCHUP_FADE_DURATION = 30.0  # 30 seconds for login/wake transitions
 
 
 def get_location():
@@ -213,7 +214,10 @@ def hard_switch(period):
     subprocess.run(["killall", "WallpaperAgent"], capture_output=True)
 
 
-def crossfade_transition(from_period, to_period):
+def crossfade_transition(from_period, to_period, duration=None):
+    if duration is None:
+        duration = FADE_DURATION
+
     from_frame = ensure_frame(from_period)
     to_frame = ensure_frame(to_period)
 
@@ -227,20 +231,15 @@ def crossfade_transition(from_period, to_period):
         hard_switch(to_period)
         return
 
-    # Write the plist immediately so the wallpaper is correct even if the
-    # overlay dies. WallpaperAgent still shows the old image until killed.
     set_wallpaper_plist(to_period)
 
-    # The overlay's mid_command kills WallpaperAgent at the midpoint, which
-    # triggers it to re-read the plist and display the new wallpaper.
-    # The overlay is covering the desktop during this, so it's seamless.
     mid_command = "killall WallpaperAgent"
 
     subprocess.Popen([
         CROSSFADE_BIN,
         from_frame,
         to_frame,
-        str(FADE_DURATION),
+        str(duration),
         mid_command,
     ])
 
@@ -351,8 +350,8 @@ def main():
     minutes_late = (now - transition_time).total_seconds() / 60.0
 
     if steps != 1 or minutes_late > 5:
-        print(f"Catching up {current_period} → {period} ({minutes_late:.0f}min late, skipping overlay)")
-        hard_switch(period)
+        print(f"Catching up {current_period} → {period} ({minutes_late:.0f}min late, quick fade)")
+        crossfade_transition(current_period, period, duration=CATCHUP_FADE_DURATION)
     else:
         print(f"Transitioning {current_period} → {period} (solar elevation: {elev:.1f}°)")
         crossfade_transition(current_period, period)
