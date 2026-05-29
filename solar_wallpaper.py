@@ -324,8 +324,23 @@ def main():
 
     sequence = ["morning", "day", "evening", "night"]
     steps = (sequence.index(period) - sequence.index(current_period)) % 4
-    if steps != 1:
-        print(f"Catching up {current_period} → {period} ({steps} steps, skipping overlay)")
+
+    # Determine if we're at the transition moment or catching up late.
+    # Transition times: morning=sunrise, day=12:00, evening=19:00, night=23:00
+    now = datetime.datetime.now()
+    if period == "morning":
+        transition_time = calculate_sunrise(lat, lon)
+    elif period == "day":
+        transition_time = now.replace(hour=12, minute=0, second=0)
+    elif period == "evening":
+        transition_time = now.replace(hour=19, minute=0, second=0)
+    else:
+        transition_time = now.replace(hour=23, minute=0, second=0)
+
+    minutes_late = (now - transition_time).total_seconds() / 60.0
+
+    if steps != 1 or minutes_late > 5:
+        print(f"Catching up {current_period} → {period} ({minutes_late:.0f}min late, skipping overlay)")
         hard_switch(period)
     else:
         print(f"Transitioning {current_period} → {period} (solar elevation: {elev:.1f}°)")
