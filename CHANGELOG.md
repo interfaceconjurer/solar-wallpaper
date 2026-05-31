@@ -59,3 +59,4 @@ The wallpaper only actually changes when the overlay's mid_command fires. If the
 | 2026-05-27 | Fix sleep catch-up (multi-step), fix agent self-unload |
 | 2026-05-28 | Multi-monitor support, revert eager hard_switch |
 | 2026-05-29 | Time-based catch-up + plist-first guarantee: overlay is now purely visual |
+| 2026-05-30 | Wake watcher + state file for reliable wake transitions |
