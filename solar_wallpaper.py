@@ -33,6 +33,7 @@ VIDEOS_DIR = os.path.expanduser(
     "~/Library/Application Support/com.apple.wallpaper/aerials/videos"
 )
 FRAMES_DIR = os.path.join(SCRIPT_DIR, "frames")
+STATE_PATH = os.path.join(SCRIPT_DIR, ".last_period")
 CROSSFADE_BIN = os.path.join(SCRIPT_DIR, "crossfade_overlay")
 LAUNCHD_PLIST = os.path.expanduser(
     "~/Library/LaunchAgents/com.jwright.solar-wallpaper.plist"
@@ -212,6 +213,8 @@ def set_wallpaper_plist(period):
 def hard_switch(period):
     set_wallpaper_plist(period)
     subprocess.run(["killall", "WallpaperAgent"], capture_output=True)
+    with open(STATE_PATH, "w") as f:
+        f.write(period)
 
 
 def crossfade_transition(from_period, to_period, duration=None):
@@ -233,7 +236,8 @@ def crossfade_transition(from_period, to_period, duration=None):
 
     set_wallpaper_plist(to_period)
 
-    mid_command = "killall WallpaperAgent"
+    state_cmd = f"echo -n '{to_period}' > '{STATE_PATH}'"
+    mid_command = f"killall WallpaperAgent; {state_cmd}"
 
     subprocess.Popen([
         CROSSFADE_BIN,
@@ -317,14 +321,28 @@ def main():
 
     lat, lon = get_location()
     period = get_period(lat, lon)
-    target_asset = WALLPAPERS[period]
-    current_asset = get_current_asset_id()
 
-    if current_asset == target_asset:
+    # Use state file to determine what's visually on screen (not the plist,
+    # which may have been written ahead of time without killing WallpaperAgent).
+    last_period = None
+    if os.path.exists(STATE_PATH):
+        try:
+            with open(STATE_PATH) as f:
+                last_period = f.read().strip()
+            if last_period not in WALLPAPERS:
+                last_period = None
+        except Exception:
+            pass
+
+    if last_period is None:
+        current_asset = get_current_asset_id()
+        last_period = ASSET_TO_PERIOD.get(current_asset)
+
+    if last_period == period:
         print(f"Already showing {period}. No change needed.")
         return
 
-    current_period = ASSET_TO_PERIOD.get(current_asset)
+    current_period = last_period
     elev = solar_elevation(lat, lon)
 
     if not current_period:

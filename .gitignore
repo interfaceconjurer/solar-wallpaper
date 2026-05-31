@@ -7,3 +7,6 @@ frame_comparison/
 transitions/
 crossfade_overlay
 crossfade_cycle
+wake_watcher
+wake_watcher.log
+.last_period
