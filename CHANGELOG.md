@@ -51,6 +51,21 @@ The wallpaper only actually changes when the overlay's mid_command fires. If the
 
 **Final fix (2026-05-29):** Decouple the plist write from the overlay entirely. `set_wallpaper_plist()` writes the target wallpaper immediately in the Python script before launching the overlay. The overlay's mid_command is now just `killall WallpaperAgent` (to refresh the display at the right moment). If the overlay dies, the plist is already correct — WallpaperAgent will show the new wallpaper on its next restart (login, wake, etc.). The time-based catch-up still hard_switches for the instant-correction case.
 
+### Overlay mid_command still unreliable (fixed 2026-06-01)
+
+**Problem:** Despite plist-first approach, the wallpaper still wasn't switching after sleep. Two issues:
+1. State file corruption: `echo -n` on macOS `/bin/sh` writes the literal `-n` flag into the file, making the state unreadable.
+2. `killall WallpaperAgent` in the overlay's mid_command never fired — overlay dies before midpoint during sleep/wake.
+
+**Root cause:** The overlay (a 30-minute or 30-second GUI process) was still responsible for killing WallpaperAgent. Any process death before midpoint meant the wallpaper plist was correct but never visually applied.
+
+**Final fix:** Remove ALL responsibility from the overlay. The Python script now:
+1. Launches the overlay (covers desktop with "from" image)
+2. Waits 0.5s for overlay to appear
+3. Runs `hard_switch()` underneath (writes plist + kills WallpaperAgent + writes state file)
+
+The overlay has zero mid_command — it just crossfades visually and exits. If it dies at any point, the wallpaper is already correct because `hard_switch` completed in the Python process before it exited.
+
 ## Version History
 
 | Date | Change |
@@ -60,3 +75,4 @@ The wallpaper only actually changes when the overlay's mid_command fires. If the
 | 2026-05-28 | Multi-monitor support, revert eager hard_switch |
 | 2026-05-29 | Time-based catch-up + plist-first guarantee: overlay is now purely visual |
 | 2026-05-30 | Wake watcher + state file for reliable wake transitions |
+| 2026-06-01 | Remove overlay mid_command entirely — Python does all switching in-process |
