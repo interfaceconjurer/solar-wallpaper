@@ -8,13 +8,11 @@ class CrossfadeOverlay: NSObject, NSApplicationDelegate {
     let fromPath: String
     let toPath: String
     let duration: Double
-    let midAction: String?
 
-    init(fromPath: String, toPath: String, duration: Double, midAction: String?) {
+    init(fromPath: String, toPath: String, duration: Double) {
         self.fromPath = fromPath
         self.toPath = toPath
         self.duration = duration
-        self.midAction = midAction
     }
 
     func applicationDidFinishLaunching(_ notification: Notification) {
@@ -95,34 +93,21 @@ class CrossfadeOverlay: NSObject, NSApplicationDelegate {
                 NSApp.terminate(nil)
             })
         }
-
-        if let action = midAction {
-            DispatchQueue.main.asyncAfter(deadline: .now() + duration / 2.0) {
-                DispatchQueue.global().async {
-                    let process = Process()
-                    process.executableURL = URL(fileURLWithPath: "/bin/sh")
-                    process.arguments = ["-c", action]
-                    try? process.run()
-                    process.waitUntilExit()
-                }
-            }
-        }
     }
 }
 
 let args = CommandLine.arguments
 guard args.count >= 4 else {
-    fputs("Usage: crossfade_overlay <from_image> <to_image> <duration_secs> [mid_command]\n", stderr)
+    fputs("Usage: crossfade_overlay <from_image> <to_image> <duration_secs>\n", stderr)
     exit(1)
 }
 
 let fromPath = args[1]
 let toPath = args[2]
 let duration = Double(args[3]) ?? 3.0
-let midAction = args.count > 4 ? args[4] : nil
 
 let app = NSApplication.shared
-let delegate = CrossfadeOverlay(fromPath: fromPath, toPath: toPath, duration: duration, midAction: midAction)
+let delegate = CrossfadeOverlay(fromPath: fromPath, toPath: toPath, duration: duration)
 app.delegate = delegate
 app.setActivationPolicy(.accessory)
 app.run()

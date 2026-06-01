@@ -22,6 +22,7 @@ import os
 import plistlib
 import subprocess
 import sys
+import time
 import urllib.request
 
 SCRIPT_DIR = os.path.dirname(os.path.abspath(__file__))
@@ -225,27 +226,26 @@ def crossfade_transition(from_period, to_period, duration=None):
     to_frame = ensure_frame(to_period)
 
     if not from_frame or not to_frame:
-        print("Could not extract frames, falling back to hard switch.")
         hard_switch(to_period)
         return
 
     if not os.path.exists(CROSSFADE_BIN):
-        print("Crossfade binary not found, falling back to hard switch.")
         hard_switch(to_period)
         return
 
-    set_wallpaper_plist(to_period)
-
-    state_cmd = f"echo -n '{to_period}' > '{STATE_PATH}'"
-    mid_command = f"killall WallpaperAgent; {state_cmd}"
-
+    # Launch overlay first — it immediately shows from_frame covering the desktop.
     subprocess.Popen([
         CROSSFADE_BIN,
         from_frame,
         to_frame,
         str(duration),
-        mid_command,
     ])
+
+    # Give the overlay time to appear and cover the desktop before we switch.
+    time.sleep(0.5)
+
+    # Now switch the real wallpaper underneath. The overlay hides this.
+    hard_switch(to_period)
 
 
 def write_schedule():
