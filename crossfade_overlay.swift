@@ -66,6 +66,9 @@ class CrossfadeOverlay: NSObject, NSApplicationDelegate {
             toLayers.append(toLayer)
         }
 
+        let readyPath = "/tmp/.solar_overlay_ready"
+        FileManager.default.createFile(atPath: readyPath, contents: nil)
+
         DispatchQueue.main.asyncAfter(deadline: .now() + 0.1) {
             self.startCrossfade()
         }

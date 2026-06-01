@@ -234,6 +234,12 @@ def crossfade_transition(from_period, to_period, duration=None):
         return
 
     # Launch overlay first — it immediately shows from_frame covering the desktop.
+    ready_path = "/tmp/.solar_overlay_ready"
+    try:
+        os.remove(ready_path)
+    except FileNotFoundError:
+        pass
+
     subprocess.Popen([
         CROSSFADE_BIN,
         from_frame,
@@ -241,8 +247,11 @@ def crossfade_transition(from_period, to_period, duration=None):
         str(duration),
     ])
 
-    # Give the overlay time to appear and cover the desktop before we switch.
-    time.sleep(0.5)
+    # Wait for the overlay to signal it's covering the desktop.
+    for _ in range(50):  # up to 5 seconds
+        if os.path.exists(ready_path):
+            break
+        time.sleep(0.1)
 
     # Now switch the real wallpaper underneath. The overlay hides this.
     hard_switch(to_period)
