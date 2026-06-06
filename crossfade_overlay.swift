@@ -70,7 +70,20 @@ class CrossfadeOverlay: NSObject, NSApplicationDelegate {
         FileManager.default.createFile(atPath: readyPath, contents: nil)
 
         DispatchQueue.main.asyncAfter(deadline: .now() + 0.1) {
+            self.applyPersistentWallpaper()
             self.startCrossfade()
+        }
+    }
+
+    func applyPersistentWallpaper() {
+        let toURL = URL(fileURLWithPath: toPath)
+        let workspace = NSWorkspace.shared
+        for screen in NSScreen.screens {
+            do {
+                try workspace.setDesktopImageURL(toURL, for: screen, options: [:])
+            } catch {
+                fputs("Warning: setDesktopImageURL failed for screen: \(error)\n", stderr)
+            }
         }
     }
 

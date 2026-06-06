@@ -11,7 +11,7 @@ Transitions:
 
 Usage:
   solar_wallpaper.py                  # Transition to the correct period for right now
-  solar_wallpaper.py --hard-switch X  # Immediately switch to period X
+  solar_wallpaper.py --hard-switch X  # Immediately switch to period X (no crossfade)
   solar_wallpaper.py --schedule       # Calculate sunrise, write launchd schedule
 """
 
@@ -19,8 +19,6 @@ import datetime
 import json
 import math
 import os
-import plistlib
-import signal
 import subprocess
 import sys
 import time
@@ -28,35 +26,23 @@ import urllib.request
 
 SCRIPT_DIR = os.path.dirname(os.path.abspath(__file__))
 CONFIG_PATH = os.path.join(SCRIPT_DIR, "config.json")
-STORE_PATH = os.path.expanduser(
-    "~/Library/Application Support/com.apple.wallpaper/Store/Index.plist"
-)
 VIDEOS_DIR = os.path.expanduser(
     "~/Library/Application Support/com.apple.wallpaper/aerials/videos"
 )
 FRAMES_DIR = os.path.join(SCRIPT_DIR, "frames")
 STATE_PATH = os.path.join(SCRIPT_DIR, ".last_period")
 CROSSFADE_BIN = os.path.join(SCRIPT_DIR, "crossfade_overlay")
-DAEMON_BIN = os.path.join(SCRIPT_DIR, "solar_daemon")
-DAEMON_PID_PATH = os.path.join(SCRIPT_DIR, ".daemon_pid")
 LAUNCHD_PLIST = os.path.expanduser(
     "~/Library/LaunchAgents/com.jwright.solar-wallpaper.plist"
 )
-DAEMON_PLIST = os.path.expanduser(
-    "~/Library/LaunchAgents/com.jwright.solar-wallpaper-daemon.plist"
-)
-OLD_WATCHER_PLIST = os.path.expanduser(
-    "~/Library/LaunchAgents/com.jwright.solar-wallpaper-watcher.plist"
-)
 
+PERIODS = ["morning", "day", "evening", "night"]
 WALLPAPERS = {
     "morning": "B2FC91ED-6891-4DEB-85A1-268B2B4160B6",
     "day": "4C108785-A7BA-422E-9C79-B0129F1D5550",
     "evening": "52ACB9B8-75FC-4516-BC60-4550CFF3B661",
     "night": "CF6347E2-4F81-4410-8892-4830991B6C5A",
 }
-
-ASSET_TO_PERIOD = {v: k for k, v in WALLPAPERS.items()}
 
 FADE_DURATION = 1800.0  # 30 minutes
 CATCHUP_FADE_DURATION = 30.0  # 30 seconds for login/wake transitions
@@ -124,25 +110,22 @@ def calculate_sunrise(lat, lon, date=None):
     if date is None:
         date = datetime.date.today()
 
-    # Search minute-by-minute from midnight to noon for the -6° crossing
     local_midnight = datetime.datetime(date.year, date.month, date.day, 0, 0, 0)
     tz_offset = datetime.datetime.now() - datetime.datetime.utcnow()
 
     prev_elev = None
-    for minute in range(0, 720):  # midnight to noon
+    for minute in range(0, 720):
         local_time = local_midnight + datetime.timedelta(minutes=minute)
         utc_time = (local_time - tz_offset).replace(tzinfo=datetime.timezone.utc)
         elev = solar_elevation(lat, lon, utc_time)
 
         if prev_elev is not None and prev_elev < -6 and elev >= -6:
-            # Interpolate to get more precise time
             fraction = (-6 - prev_elev) / (elev - prev_elev)
             sunrise_time = local_midnight + datetime.timedelta(minutes=minute - 1 + fraction)
             return sunrise_time
 
         prev_elev = elev
 
-    # Fallback: sun doesn't cross -6° (polar regions), use 6am
     return local_midnight.replace(hour=6)
 
 
@@ -161,17 +144,6 @@ def get_period(lat, lon):
     if local_hour < 19:
         return "day"
     return "evening"
-
-
-def get_current_asset_id():
-    try:
-        with open(STORE_PATH, "rb") as f:
-            data = plistlib.load(f)
-        config_bytes = data["AllSpacesAndDisplays"]["Linked"]["Content"]["Choices"][0]["Configuration"]
-        config = plistlib.loads(config_bytes)
-        return config.get("assetID")
-    except Exception:
-        return None
 
 
 def ensure_frame(period):
@@ -200,75 +172,42 @@ def ensure_frame(period):
     return frame_path
 
 
-def set_wallpaper_plist(period):
-    """Write the target period into the wallpaper plist (no visual change yet)."""
-    asset_id = WALLPAPERS[period]
-
-    with open(STORE_PATH, "rb") as f:
-        data = plistlib.load(f)
-
-    new_config = plistlib.dumps({"assetID": asset_id}, fmt=plistlib.FMT_BINARY)
-    now = datetime.datetime.now()
-
-    for key in ["AllSpacesAndDisplays", "SystemDefault"]:
-        if key in data and "Linked" in data[key]:
-            data[key]["Linked"]["Content"]["Choices"][0]["Configuration"] = new_config
-            data[key]["Linked"]["LastSet"] = now
-            data[key]["Linked"]["LastUse"] = now
-
-    with open(STORE_PATH, "wb") as f:
-        plistlib.dump(data, f, fmt=plistlib.FMT_BINARY)
+def load_last_period():
+    if not os.path.exists(STATE_PATH):
+        return None
+    try:
+        with open(STATE_PATH) as f:
+            value = f.read().strip()
+        return value if value in WALLPAPERS else None
+    except Exception:
+        return None
 
 
-def set_wallpaper_osascript(period):
-    """Set wallpaper on all displays via AppleScript (no flash, multi-monitor)."""
-    frame_path = os.path.join(FRAMES_DIR, f"{period}.png")
-    if os.path.exists(frame_path):
-        script = (
-            'tell application "System Events"\n'
-            '    tell every desktop\n'
-            f'        set picture to "{frame_path}"\n'
-            '    end tell\n'
-            'end tell'
-        )
-        subprocess.run(["osascript", "-e", script], capture_output=True)
-
-
-def hard_switch(period):
-    set_wallpaper_plist(period)
-    set_wallpaper_osascript(period)
+def save_last_period(period):
     with open(STATE_PATH, "w") as f:
         f.write(period)
 
 
-def signal_daemon():
-    """Send SIGUSR1 to the persistent daemon to trigger a crossfade."""
-    try:
-        with open(DAEMON_PID_PATH) as f:
-            pid = int(f.read().strip())
-        os.kill(pid, signal.SIGUSR1)
-        return True
-    except (FileNotFoundError, ValueError, ProcessLookupError, PermissionError):
-        return False
-
-
-def crossfade_transition(from_period, to_period, duration=None):
-    if signal_daemon():
-        return
-
-    if duration is None:
-        duration = FADE_DURATION
-
+def run_overlay(from_period, to_period, duration):
+    """Launch the overlay binary. The overlay writes the persistent wallpaper
+    to to_period via NSWorkspace.setDesktopImageURL while it covers the screen,
+    then crossfades and exits."""
     from_frame = ensure_frame(from_period)
     to_frame = ensure_frame(to_period)
 
-    if not from_frame or not to_frame:
-        hard_switch(to_period)
-        return
+    if not to_frame or not os.path.exists(CROSSFADE_BIN):
+        print(
+            f"Cannot transition: missing frame or overlay binary "
+            f"(to_frame={to_frame}, bin={CROSSFADE_BIN})",
+            file=sys.stderr,
+        )
+        return False
 
-    if not os.path.exists(CROSSFADE_BIN):
-        hard_switch(to_period)
-        return
+    # If we don't have a from-frame (first run), reuse the to-frame so the
+    # overlay still launches and writes the persistent wallpaper.
+    if not from_frame:
+        from_frame = to_frame
+        duration = 0.0
 
     ready_path = "/tmp/.solar_overlay_ready"
     try:
@@ -288,38 +227,14 @@ def crossfade_transition(from_period, to_period, duration=None):
             break
         time.sleep(0.1)
 
-    hard_switch(to_period)
+    save_last_period(to_period)
+    return True
 
 
-def install_daemon():
-    """Write and load the daemon's launchd plist. Unload old watcher if present."""
-    daemon_path = os.path.abspath(DAEMON_BIN)
-
-    plist = {
-        "Label": "com.jwright.solar-wallpaper-daemon",
-        "ProgramArguments": [daemon_path],
-        "KeepAlive": True,
-        "RunAtLoad": True,
-        "StandardOutPath": os.path.join(SCRIPT_DIR, "solar_daemon.log"),
-        "StandardErrorPath": os.path.join(SCRIPT_DIR, "solar_daemon.log"),
-    }
-
-    with open(DAEMON_PLIST, "wb") as f:
-        plistlib.dump(plist, f)
-
-    # Unload old watcher if it exists
-    if os.path.exists(OLD_WATCHER_PLIST):
-        subprocess.run(
-            ["launchctl", "unload", OLD_WATCHER_PLIST],
-            capture_output=True,
-        )
-        os.remove(OLD_WATCHER_PLIST)
-        print("Removed old wake_watcher agent.")
-
-    # Reload daemon
-    subprocess.run(["launchctl", "unload", DAEMON_PLIST], capture_output=True)
-    subprocess.run(["launchctl", "load", DAEMON_PLIST], capture_output=True)
-    print(f"Daemon agent installed and loaded.")
+def hard_switch(period):
+    """Set the wallpaper to period with no crossfade (zero-duration overlay
+    so the persistent wallpaper still gets written via setDesktopImageURL)."""
+    run_overlay(period, period, duration=0.0)
 
 
 def write_schedule():
@@ -343,23 +258,20 @@ def write_schedule():
         "Label": "com.jwright.solar-wallpaper",
         "ProgramArguments": ["/usr/bin/python3", script_path],
         "StartCalendarInterval": [
-            {"Hour": sunrise_hour, "Minute": sunrise_minute},  # morning
-            {"Hour": 12, "Minute": 0},   # day
-            {"Hour": 19, "Minute": 0},   # evening
-            {"Hour": 23, "Minute": 0},   # night
-            {"Hour": 3, "Minute": 0},    # recalculate sunrise for tomorrow
+            {"Hour": sunrise_hour, "Minute": sunrise_minute},
+            {"Hour": 12, "Minute": 0},
+            {"Hour": 19, "Minute": 0},
+            {"Hour": 23, "Minute": 0},
+            {"Hour": 3, "Minute": 0},
         ],
         "RunAtLoad": True,
         "StandardOutPath": os.path.join(SCRIPT_DIR, "solar_wallpaper.log"),
         "StandardErrorPath": os.path.join(SCRIPT_DIR, "solar_wallpaper.log"),
     }
 
+    import plistlib
     with open(LAUNCHD_PLIST, "wb") as f:
         plistlib.dump(plist, f)
-
-    # Ensure daemon is installed
-    if os.path.exists(DAEMON_BIN):
-        install_daemon()
 
     # Reload via a detached process — unloading from within the running job
     # would kill this process before the load can execute.
@@ -387,12 +299,6 @@ def main():
                 sys.exit(1)
         return
 
-    if "--install" in sys.argv:
-        if os.path.exists(DAEMON_BIN):
-            install_daemon()
-        write_schedule()
-        return
-
     if "--schedule" in sys.argv:
         write_schedule()
         return
@@ -405,58 +311,39 @@ def main():
 
     lat, lon = get_location()
     period = get_period(lat, lon)
-
-    # Use state file to determine what's visually on screen (not the plist,
-    # which may have been written ahead of time without killing WallpaperAgent).
-    last_period = None
-    if os.path.exists(STATE_PATH):
-        try:
-            with open(STATE_PATH) as f:
-                last_period = f.read().strip()
-            if last_period not in WALLPAPERS:
-                last_period = None
-        except Exception:
-            pass
-
-    if last_period is None:
-        current_asset = get_current_asset_id()
-        last_period = ASSET_TO_PERIOD.get(current_asset)
+    last_period = load_last_period()
 
     if last_period == period:
         print(f"Already showing {period}. No change needed.")
         return
 
-    current_period = last_period
     elev = solar_elevation(lat, lon)
 
-    if not current_period:
+    if not last_period:
         print(f"Switched to Tahoe {period.capitalize()} (solar elevation: {elev:.1f}°)")
         hard_switch(period)
         return
 
-    sequence = ["morning", "day", "evening", "night"]
-    steps = (sequence.index(period) - sequence.index(current_period)) % 4
+    steps = (PERIODS.index(period) - PERIODS.index(last_period)) % 4
 
     # Determine if we're at the transition moment or catching up late.
-    # Transition times: morning=sunrise, day=12:00, evening=19:00, night=23:00
-    now = datetime.datetime.now()
     if period == "morning":
         transition_time = calculate_sunrise(lat, lon)
     elif period == "day":
-        transition_time = now.replace(hour=12, minute=0, second=0)
+        transition_time = now.replace(hour=12, minute=0, second=0, microsecond=0)
     elif period == "evening":
-        transition_time = now.replace(hour=19, minute=0, second=0)
+        transition_time = now.replace(hour=19, minute=0, second=0, microsecond=0)
     else:
-        transition_time = now.replace(hour=23, minute=0, second=0)
+        transition_time = now.replace(hour=23, minute=0, second=0, microsecond=0)
 
     minutes_late = (now - transition_time).total_seconds() / 60.0
 
     if steps != 1 or minutes_late > 5:
-        print(f"Catching up {current_period} → {period} ({minutes_late:.0f}min late, quick fade)")
-        crossfade_transition(current_period, period, duration=CATCHUP_FADE_DURATION)
+        print(f"Catching up {last_period} → {period} ({minutes_late:.0f}min late, quick fade)")
+        run_overlay(last_period, period, duration=CATCHUP_FADE_DURATION)
     else:
-        print(f"Transitioning {current_period} → {period} (solar elevation: {elev:.1f}°)")
-        crossfade_transition(current_period, period)
+        print(f"Transitioning {last_period} → {period} (solar elevation: {elev:.1f}°)")
+        run_overlay(last_period, period, duration=FADE_DURATION)
 
 
 if __name__ == "__main__":

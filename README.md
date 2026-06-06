@@ -24,12 +24,14 @@ A launch agent runs the script at specific transition times rather than polling.
 
 When a transition triggers:
 
-1. A compiled Swift overlay appears at the desktop window level
-2. The overlay crossfades between the current and target period over 30 minutes using GPU-accelerated Core Animation
-3. At the midpoint, the actual macOS wallpaper asset is switched underneath
-4. The overlay fades out, revealing the real wallpaper seamlessly
+1. A compiled Swift overlay appears at the desktop window level, showing the *from* frame.
+2. The overlay calls `NSWorkspace.setDesktopImageURL` to set the persistent macOS wallpaper to the *to* frame — invisibly, since the overlay is covering the desktop.
+3. The overlay crossfades from → to over 30 minutes using GPU-accelerated Core Animation.
+4. The overlay fades out and exits, revealing the real (persistent) wallpaper underneath.
 
-All four Tahoe videos share an identical slow camera pan — only the lighting differs. The transition extracts frames at the same timestamp (t=0) so the composition stays perfectly aligned during crossfade.
+Because the persistent wallpaper is set via the documented macOS API, the correct wallpaper survives login, sleep/wake, and reboot natively. No daemon, no `Index.plist` mutation, no `killall WallpaperAgent`.
+
+All four Tahoe videos share an identical slow camera pan. The transition extracts frames at the same timestamp (t=0) so the composition stays perfectly aligned during crossfade.
 
 ## Setup
 
