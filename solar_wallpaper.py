@@ -20,6 +20,7 @@ import json
 import math
 import os
 import plistlib
+import signal
 import subprocess
 import sys
 import time
@@ -36,8 +37,16 @@ VIDEOS_DIR = os.path.expanduser(
 FRAMES_DIR = os.path.join(SCRIPT_DIR, "frames")
 STATE_PATH = os.path.join(SCRIPT_DIR, ".last_period")
 CROSSFADE_BIN = os.path.join(SCRIPT_DIR, "crossfade_overlay")
+DAEMON_BIN = os.path.join(SCRIPT_DIR, "solar_daemon")
+DAEMON_PID_PATH = os.path.join(SCRIPT_DIR, ".daemon_pid")
 LAUNCHD_PLIST = os.path.expanduser(
     "~/Library/LaunchAgents/com.jwright.solar-wallpaper.plist"
+)
+DAEMON_PLIST = os.path.expanduser(
+    "~/Library/LaunchAgents/com.jwright.solar-wallpaper-daemon.plist"
+)
+OLD_WATCHER_PLIST = os.path.expanduser(
+    "~/Library/LaunchAgents/com.jwright.solar-wallpaper-watcher.plist"
 )
 
 WALLPAPERS = {
@@ -211,14 +220,42 @@ def set_wallpaper_plist(period):
         plistlib.dump(data, f, fmt=plistlib.FMT_BINARY)
 
 
+def set_wallpaper_osascript(period):
+    """Set wallpaper on all displays via AppleScript (no flash, multi-monitor)."""
+    frame_path = os.path.join(FRAMES_DIR, f"{period}.png")
+    if os.path.exists(frame_path):
+        script = (
+            'tell application "System Events"\n'
+            '    tell every desktop\n'
+            f'        set picture to "{frame_path}"\n'
+            '    end tell\n'
+            'end tell'
+        )
+        subprocess.run(["osascript", "-e", script], capture_output=True)
+
+
 def hard_switch(period):
     set_wallpaper_plist(period)
-    subprocess.run(["killall", "WallpaperAgent"], capture_output=True)
+    set_wallpaper_osascript(period)
     with open(STATE_PATH, "w") as f:
         f.write(period)
 
 
+def signal_daemon():
+    """Send SIGUSR1 to the persistent daemon to trigger a crossfade."""
+    try:
+        with open(DAEMON_PID_PATH) as f:
+            pid = int(f.read().strip())
+        os.kill(pid, signal.SIGUSR1)
+        return True
+    except (FileNotFoundError, ValueError, ProcessLookupError, PermissionError):
+        return False
+
+
 def crossfade_transition(from_period, to_period, duration=None):
+    if signal_daemon():
+        return
+
     if duration is None:
         duration = FADE_DURATION
 
@@ -233,7 +270,6 @@ def crossfade_transition(from_period, to_period, duration=None):
         hard_switch(to_period)
         return
 
-    # Launch overlay first — it immediately shows from_frame covering the desktop.
     ready_path = "/tmp/.solar_overlay_ready"
     try:
         os.remove(ready_path)
@@ -247,14 +283,43 @@ def crossfade_transition(from_period, to_period, duration=None):
         str(duration),
     ])
 
-    # Wait for the overlay to signal it's covering the desktop.
-    for _ in range(50):  # up to 5 seconds
+    for _ in range(50):
         if os.path.exists(ready_path):
             break
         time.sleep(0.1)
 
-    # Now switch the real wallpaper underneath. The overlay hides this.
     hard_switch(to_period)
+
+
+def install_daemon():
+    """Write and load the daemon's launchd plist. Unload old watcher if present."""
+    daemon_path = os.path.abspath(DAEMON_BIN)
+
+    plist = {
+        "Label": "com.jwright.solar-wallpaper-daemon",
+        "ProgramArguments": [daemon_path],
+        "KeepAlive": True,
+        "RunAtLoad": True,
+        "StandardOutPath": os.path.join(SCRIPT_DIR, "solar_daemon.log"),
+        "StandardErrorPath": os.path.join(SCRIPT_DIR, "solar_daemon.log"),
+    }
+
+    with open(DAEMON_PLIST, "wb") as f:
+        plistlib.dump(plist, f)
+
+    # Unload old watcher if it exists
+    if os.path.exists(OLD_WATCHER_PLIST):
+        subprocess.run(
+            ["launchctl", "unload", OLD_WATCHER_PLIST],
+            capture_output=True,
+        )
+        os.remove(OLD_WATCHER_PLIST)
+        print("Removed old wake_watcher agent.")
+
+    # Reload daemon
+    subprocess.run(["launchctl", "unload", DAEMON_PLIST], capture_output=True)
+    subprocess.run(["launchctl", "load", DAEMON_PLIST], capture_output=True)
+    print(f"Daemon agent installed and loaded.")
 
 
 def write_schedule():
@@ -292,6 +357,10 @@ def write_schedule():
     with open(LAUNCHD_PLIST, "wb") as f:
         plistlib.dump(plist, f)
 
+    # Ensure daemon is installed
+    if os.path.exists(DAEMON_BIN):
+        install_daemon()
+
     # Reload via a detached process — unloading from within the running job
     # would kill this process before the load can execute.
     subprocess.Popen(
@@ -316,6 +385,12 @@ def main():
             else:
                 print(f"Unknown period: {period}", file=sys.stderr)
                 sys.exit(1)
+        return
+
+    if "--install" in sys.argv:
+        if os.path.exists(DAEMON_BIN):
+            install_daemon()
+        write_schedule()
         return
 
     if "--schedule" in sys.argv:
