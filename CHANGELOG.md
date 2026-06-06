@@ -4,14 +4,13 @@ Ongoing record of changes, known issues, and debugging sessions for the solar wa
 
 ## Architecture
 
-The system has two cooperating parts:
+The system has three cooperating parts:
 
-1. **`solar_wallpaper.py`** — Determines the correct period, launches the overlay or hard-switches.
-2. **`crossfade_overlay` (Swift binary)** — GUI process that displays a fullscreen crossfade on all screens. Fires a mid_command (hard_switch) at the halfway point.
+1. **`solar_wallpaper.py`** — Determines the correct period and signals the daemon (or falls back to launching the transient overlay).
+2. **`solar_daemon` (Swift binary)** — Long-running GUI process. Holds fullscreen overlay windows on every display, performs crossfades via Core Animation on SIGUSR1, and reacts to wake/unlock/display-config events on its own.
+3. **`crossfade_overlay` (Swift binary)** — Legacy transient overlay. Still present as a fallback if the daemon isn't running.
 
-The wallpaper only actually changes when the overlay's mid_command fires. If the overlay process dies before reaching the midpoint, the wallpaper stays on the old image.
-
-**Scheduling:** A `launchd` agent (`com.jwright.solar-wallpaper`) fires the script at sunrise, 12:00, 19:00, 23:00, and 03:00. `RunAtLoad` triggers on login. At 3am the script recalculates sunrise for the new day and rewrites the schedule.
+**Scheduling:** A `launchd` agent (`com.jwright.solar-wallpaper`) fires the script at sunrise, 12:00, 19:00, 23:00, and 03:00. `RunAtLoad` triggers on login. At 3am the script recalculates sunrise for the new day and rewrites the schedule. A second agent (`com.jwright.solar-wallpaper-daemon`) keeps `solar_daemon` alive with `KeepAlive`.
 
 ## Known Issues & Fixes
 
@@ -51,6 +50,20 @@ The wallpaper only actually changes when the overlay's mid_command fires. If the
 
 **Final fix (2026-05-29):** Decouple the plist write from the overlay entirely. `set_wallpaper_plist()` writes the target wallpaper immediately in the Python script before launching the overlay. The overlay's mid_command is now just `killall WallpaperAgent` (to refresh the display at the right moment). If the overlay dies, the plist is already correct — WallpaperAgent will show the new wallpaper on its next restart (login, wake, etc.). The time-based catch-up still hard_switches for the instant-correction case.
 
+### Persistent daemon replaces transient overlay (2026-06-02)
+
+**Problem:** Even with the overlay reduced to a purely visual role, every transition still spawned a fresh GUI process that was vulnerable to sleep, wake, and display reconfiguration. Wake transitions in particular were a chain of fragile launches: scheduler → overlay → hope it survives long enough to crossfade.
+
+**Fix:** Introduced `solar_daemon` (Swift), a single always-running GUI process that:
+1. Holds a fullscreen overlay window on every display, layered just above the desktop icons.
+2. Listens for `SIGUSR1` from the scheduler and crossfades via Core Animation in-process.
+3. Registers for `IORegisterForSystemPower`, `NSWorkspace.didWakeNotification`, screen-unlock, and display-config notifications — handling wake/unlock without any external trigger.
+4. Writes its PID to `.daemon_pid` so the Python script can signal it.
+
+`solar_wallpaper.py` now sends `SIGUSR1` to the daemon for crossfades and only falls back to the transient `crossfade_overlay` binary if no daemon is running. The hard-switch path also drops `killall WallpaperAgent` in favor of `osascript ... set picture to ...`, which avoids the brief flash that `killall` produced.
+
+The old `wake_watcher` agent is now redundant; `--install` unloads it automatically.
+
 ### Overlay mid_command still unreliable (fixed 2026-06-01)
 
 **Problem:** Despite plist-first approach, the wallpaper still wasn't switching after sleep. Two issues:
@@ -76,3 +89,4 @@ The overlay has zero mid_command — it just crossfades visually and exits. If i
 | 2026-05-29 | Time-based catch-up + plist-first guarantee: overlay is now purely visual |
 | 2026-05-30 | Wake watcher + state file for reliable wake transitions |
 | 2026-06-01 | Remove overlay mid_command entirely — Python does all switching in-process |
+| 2026-06-02 | Persistent `solar_daemon` replaces transient overlay; osascript switch eliminates flash |
