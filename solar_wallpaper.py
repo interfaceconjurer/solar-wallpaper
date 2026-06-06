@@ -215,12 +215,17 @@ def run_overlay(from_period, to_period, duration):
     except FileNotFoundError:
         pass
 
-    subprocess.Popen([
-        CROSSFADE_BIN,
-        from_frame,
-        to_frame,
-        str(duration),
-    ])
+    # start_new_session detaches the overlay from this script's process
+    # group so launchd doesn't kill it when it reaps the script.
+    subprocess.Popen(
+        [
+            CROSSFADE_BIN,
+            from_frame,
+            to_frame,
+            str(duration),
+        ],
+        start_new_session=True,
+    )
 
     for _ in range(50):
         if os.path.exists(ready_path):

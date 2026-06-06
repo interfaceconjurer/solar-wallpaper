@@ -66,11 +66,14 @@ class CrossfadeOverlay: NSObject, NSApplicationDelegate {
             toLayers.append(toLayer)
         }
 
+        // Set the persistent wallpaper *before* signaling ready so that if
+        // we're killed immediately after, the on-disk state reflects truth.
+        applyPersistentWallpaper()
+
         let readyPath = "/tmp/.solar_overlay_ready"
         FileManager.default.createFile(atPath: readyPath, contents: nil)
 
         DispatchQueue.main.asyncAfter(deadline: .now() + 0.1) {
-            self.applyPersistentWallpaper()
             self.startCrossfade()
         }
     }
