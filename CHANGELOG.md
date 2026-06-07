@@ -13,11 +13,21 @@ The system has two cooperating parts:
    3. Crossfades from → to over the requested duration.
    4. Fades the overlay window out and exits.
 
+3. **`screen_watcher` (Swift binary)** — Persistent daemon that listens for `NSApplication.didChangeScreenParametersNotification`. When a new display is connected, it reads `.last_period` and re-applies the wallpaper to all screens via `setDesktopImageURL`.
+
 **Scheduling:** A single `launchd` agent (`com.jwright.solar-wallpaper`) fires the script at sunrise, 12:00, 19:00, 23:00, and 03:00. `RunAtLoad` triggers on login. At 3am the script recalculates sunrise for the new day and rewrites the schedule.
 
-**Persistence:** macOS itself owns wallpaper persistence — `setDesktopImageURL` writes through to the wallpaper config, so the correct wallpaper survives login, sleep/wake, and reboot natively. No `Index.plist` mutation, no `killall WallpaperAgent`, no daemon, no wake watcher.
+**Display hotplug:** A second `launchd` agent (`com.jwright.solar-wallpaper-watcher`) keeps `screen_watcher` alive. It only acts when the screen count *increases* — applying the current period's wallpaper to all screens so newly connected displays don't show a stale image.
+
+**Persistence:** macOS itself owns wallpaper persistence — `setDesktopImageURL` writes through to the wallpaper config, so the correct wallpaper survives login, sleep/wake, and reboot natively. No `Index.plist` mutation, no `killall WallpaperAgent`, no wake watcher.
 
 ## Known Issues & Fixes
+
+### Secondary display stuck on stale wallpaper after hotplug (fixed 2026-06-07)
+
+**Problem:** Connecting an external display after a transition already fired left the new screen showing whatever wallpaper macOS last remembered for it (e.g., daytime image at night). `setDesktopImageURL` only runs during transitions, so newly connected displays were never updated until the next scheduled period change.
+
+**Fix:** Added `screen_watcher.swift` — a lightweight persistent daemon that observes `didChangeScreenParametersNotification`. When the screen count increases (display connected), it reads `.last_period` and calls `setDesktopImageURL` for all screens. Managed by `com.jwright.solar-wallpaper-watcher` launchd agent with `KeepAlive`.
 
 ### Overlay killed by sleep (fixed 2026-05-27)
 

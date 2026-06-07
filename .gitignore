@@ -7,4 +7,5 @@ frame_comparison/
 transitions/
 crossfade_overlay
 crossfade_cycle
+screen_watcher
 .last_period
