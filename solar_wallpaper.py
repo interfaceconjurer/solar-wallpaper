@@ -1,7 +1,11 @@
 #!/usr/bin/env python3
 """
 Switches macOS wallpaper between Tahoe Morning/Day/Evening/Night
-with smooth crossfade transitions.
+with smooth transitions via pre-blended frame stepping.
+
+Instead of a fragile overlay process, transitions step through pre-rendered
+intermediate frames using setDesktopImageURL. Each step is ~3% opacity change
+— imperceptible individually, smooth in aggregate.
 
 Transitions:
   night → morning:  sunrise (calculated daily)
@@ -10,8 +14,8 @@ Transitions:
   evening → night:  23:00
 
 Usage:
-  solar_wallpaper.py                  # Transition to the correct period for right now
-  solar_wallpaper.py --hard-switch X  # Immediately switch to period X (no crossfade)
+  solar_wallpaper.py                  # Transition to the correct period
+  solar_wallpaper.py --hard-switch X  # Immediately switch to period X
   solar_wallpaper.py --schedule       # Calculate sunrise, write launchd schedule
 """
 
@@ -30,11 +34,14 @@ VIDEOS_DIR = os.path.expanduser(
     "~/Library/Application Support/com.apple.wallpaper/aerials/videos"
 )
 FRAMES_DIR = os.path.join(SCRIPT_DIR, "frames")
+TRANSITIONS_DIR = os.path.join(SCRIPT_DIR, "transitions")
 STATE_PATH = os.path.join(SCRIPT_DIR, ".last_period")
-CROSSFADE_BIN = os.path.join(SCRIPT_DIR, "crossfade_overlay")
+PROGRESS_PATH = os.path.join(SCRIPT_DIR, ".transition_progress")
+SET_WALLPAPER_BIN = os.path.join(SCRIPT_DIR, "set_wallpaper")
 LAUNCHD_PLIST = os.path.expanduser(
     "~/Library/LaunchAgents/com.jwright.solar-wallpaper.plist"
 )
+LOG_PATH = os.path.join(SCRIPT_DIR, "solar_wallpaper.log")
 
 PERIODS = ["morning", "day", "evening", "night"]
 WALLPAPERS = {
@@ -44,8 +51,53 @@ WALLPAPERS = {
     "night": "CF6347E2-4F81-4410-8892-4830991B6C5A",
 }
 
-FADE_DURATION = 1800.0  # 30 minutes
-CATCHUP_FADE_DURATION = 30.0  # 30 seconds for login/wake transitions
+TRANSITION_STEPS = 30      # intermediate frames per transition
+TRANSITION_DURATION = 1800  # 30 minutes for scheduled transitions
+CATCHUP_DURATION = 5.0      # 5 seconds for wake/catch-up transitions
+
+# Lock file to prevent multiple instances from fighting
+LOCK_PATH = os.path.join(SCRIPT_DIR, ".solar_lock")
+
+
+def log(msg):
+    """Append to log with timestamp."""
+    timestamp = datetime.datetime.now().strftime("%Y-%m-%d %H:%M:%S")
+    line = f"[{timestamp}] {msg}"
+    print(line)
+    try:
+        with open(LOG_PATH, "a") as f:
+            f.write(line + "\n")
+    except Exception:
+        pass
+
+
+def acquire_lock():
+    """Simple PID-based lock. Returns True if we got it."""
+    pid = os.getpid()
+    if os.path.exists(LOCK_PATH):
+        try:
+            with open(LOCK_PATH) as f:
+                old_pid = int(f.read().strip())
+            # Check if the old process is still alive
+            try:
+                os.kill(old_pid, 0)
+                # Process is alive — we lose
+                return False
+            except OSError:
+                # Process is dead — stale lock
+                pass
+        except (ValueError, IOError):
+            pass
+    with open(LOCK_PATH, "w") as f:
+        f.write(str(pid))
+    return True
+
+
+def release_lock():
+    try:
+        os.remove(LOCK_PATH)
+    except FileNotFoundError:
+        pass
 
 
 def get_location():
@@ -67,7 +119,7 @@ def get_location():
             json.dump({"latitude": lat, "longitude": lon}, f, indent=2)
         return lat, lon
     except Exception as e:
-        print(f"Could not determine location: {e}", file=sys.stderr)
+        log(f"Could not determine location: {e}")
         sys.exit(1)
 
 
@@ -105,8 +157,7 @@ def solar_elevation(lat, lon, dt=None):
 
 
 def calculate_sunrise(lat, lon, date=None):
-    """Calculate civil twilight (solar elevation = -6°) for the given date.
-    Returns a local datetime for when the sun crosses -6° on the way up."""
+    """Calculate civil twilight (solar elevation = -6°) for the given date."""
     if date is None:
         date = datetime.date.today()
 
@@ -144,6 +195,19 @@ def get_period(lat, lon):
     if local_hour < 19:
         return "day"
     return "evening"
+
+
+def get_transition_time(period, lat, lon):
+    """Get the datetime when a transition TO this period should start."""
+    now = datetime.datetime.now()
+    if period == "morning":
+        return calculate_sunrise(lat, lon)
+    elif period == "day":
+        return now.replace(hour=12, minute=0, second=0, microsecond=0)
+    elif period == "evening":
+        return now.replace(hour=19, minute=0, second=0, microsecond=0)
+    else:  # night
+        return now.replace(hour=23, minute=0, second=0, microsecond=0)
 
 
 def ensure_frame(period):
@@ -188,77 +252,158 @@ def save_last_period(period):
         f.write(period)
 
 
-def run_overlay(from_period, to_period, duration):
-    """Launch the overlay binary. The overlay writes the persistent wallpaper
-    to to_period via NSWorkspace.setDesktopImageURL while it covers the screen,
-    then crossfades and exits."""
-    from_frame = ensure_frame(from_period)
-    to_frame = ensure_frame(to_period)
+def save_progress(from_period, to_period, step, start_time):
+    """Save transition progress so we can resume after wake."""
+    data = {
+        "from": from_period,
+        "to": to_period,
+        "step": step,
+        "start_time": start_time.isoformat(),
+    }
+    with open(PROGRESS_PATH, "w") as f:
+        json.dump(data, f)
 
-    if not to_frame or not os.path.exists(CROSSFADE_BIN):
-        print(
-            f"Cannot transition: missing frame or overlay binary "
-            f"(to_frame={to_frame}, bin={CROSSFADE_BIN})",
-            file=sys.stderr,
-        )
-        return False
 
-    # If we don't have a from-frame (first run), reuse the to-frame so the
-    # overlay still launches and writes the persistent wallpaper.
-    if not from_frame:
-        from_frame = to_frame
-        duration = 0.0
-
-    ready_path = "/tmp/.solar_overlay_ready"
+def load_progress():
+    """Load in-progress transition state."""
+    if not os.path.exists(PROGRESS_PATH):
+        return None
     try:
-        os.remove(ready_path)
+        with open(PROGRESS_PATH) as f:
+            data = json.load(f)
+        data["start_time"] = datetime.datetime.fromisoformat(data["start_time"])
+        return data
+    except Exception:
+        return None
+
+
+def clear_progress():
+    try:
+        os.remove(PROGRESS_PATH)
     except FileNotFoundError:
         pass
 
-    # start_new_session detaches the overlay from this script's process
-    # group so launchd doesn't kill it when it reaps the script.
-    subprocess.Popen(
-        [
-            CROSSFADE_BIN,
-            from_frame,
-            to_frame,
-            str(duration),
-        ],
-        start_new_session=True,
+
+def set_wallpaper(image_path):
+    """Set the desktop wallpaper on all screens via the set_wallpaper binary."""
+    if not os.path.exists(SET_WALLPAPER_BIN):
+        log(f"Error: set_wallpaper binary not found at {SET_WALLPAPER_BIN}")
+        return False
+    result = subprocess.run(
+        [SET_WALLPAPER_BIN, image_path],
+        capture_output=True,
+        text=True,
     )
-
-    for _ in range(50):
-        if os.path.exists(ready_path):
-            break
-        time.sleep(0.1)
-
-    save_last_period(to_period)
+    if result.returncode != 0:
+        log(f"set_wallpaper failed: {result.stderr.strip()}")
+        return False
     return True
 
 
+def get_transition_frame(from_period, to_period, step):
+    """Get the path to a specific transition frame.
+    step=0 → from.png, step=TRANSITION_STEPS+1 → to.png,
+    step=1..TRANSITION_STEPS → intermediate frame."""
+    if step <= 0:
+        return os.path.join(FRAMES_DIR, f"{from_period}.png")
+    if step > TRANSITION_STEPS:
+        return os.path.join(FRAMES_DIR, f"{to_period}.png")
+    # Intermediate frames are 00-indexed: step 1 → 00.jpg, step 30 → 29.jpg
+    dir_name = f"{from_period}_to_{to_period}"
+    frame_name = f"{step - 1:02d}.jpg"
+    return os.path.join(TRANSITIONS_DIR, dir_name, frame_name)
+
+
+def transition_frames_exist(from_period, to_period):
+    """Check if pre-rendered transition frames exist for this pair."""
+    dir_name = f"{from_period}_to_{to_period}"
+    dir_path = os.path.join(TRANSITIONS_DIR, dir_name)
+    if not os.path.isdir(dir_path):
+        return False
+    # Check at least the first and last intermediate frame
+    return (
+        os.path.exists(os.path.join(dir_path, "00.jpg"))
+        and os.path.exists(os.path.join(dir_path, f"{TRANSITION_STEPS - 1:02d}.jpg"))
+    )
+
+
+def run_transition(from_period, to_period, duration):
+    """Step through pre-rendered frames over the given duration.
+    Uses wall-clock anchoring so sleep/wake is handled naturally."""
+    if not transition_frames_exist(from_period, to_period):
+        log(f"No transition frames for {from_period}→{to_period}, hard-switching")
+        frame = os.path.join(FRAMES_DIR, f"{to_period}.png")
+        if os.path.exists(frame):
+            set_wallpaper(frame)
+        save_last_period(to_period)
+        clear_progress()
+        return
+
+    total_steps = TRANSITION_STEPS + 1  # intermediate frames + final
+    step_interval = duration / total_steps
+    start_time = datetime.datetime.now()
+
+    save_progress(from_period, to_period, 0, start_time)
+
+    for step in range(1, total_steps + 1):
+        # Wall-clock anchoring: always check where we SHOULD be
+        elapsed = (datetime.datetime.now() - start_time).total_seconds()
+        expected_step = min(int(elapsed / step_interval) + 1, total_steps) if step_interval > 0 else total_steps
+
+        # If we've fallen behind (e.g., wake from sleep), skip ahead
+        actual_step = max(step, expected_step)
+
+        frame_path = get_transition_frame(from_period, to_period, actual_step)
+        if os.path.exists(frame_path):
+            set_wallpaper(frame_path)
+
+        save_progress(from_period, to_period, actual_step, start_time)
+
+        if actual_step >= total_steps:
+            break
+
+        # Sleep until the next frame is due
+        next_time = start_time + datetime.timedelta(seconds=actual_step * step_interval)
+        sleep_secs = (next_time - datetime.datetime.now()).total_seconds()
+        if sleep_secs > 0:
+            time.sleep(sleep_secs)
+
+        step = actual_step  # advance the loop counter past skipped frames
+
+    # Final: set the endpoint frame and save state
+    final_frame = os.path.join(FRAMES_DIR, f"{to_period}.png")
+    if os.path.exists(final_frame):
+        set_wallpaper(final_frame)
+    save_last_period(to_period)
+    clear_progress()
+
+
 def hard_switch(period):
-    """Set the wallpaper to period with no crossfade (zero-duration overlay
-    so the persistent wallpaper still gets written via setDesktopImageURL)."""
-    run_overlay(period, period, duration=0.0)
+    """Immediately set wallpaper to a period with no transition."""
+    frame = ensure_frame(period)
+    if frame:
+        set_wallpaper(frame)
+    save_last_period(period)
+    clear_progress()
 
 
 def write_schedule():
-    """Calculate today's sunrise and write the launchd plist with all transition times."""
+    """Calculate today's sunrise and write the launchd plist."""
     lat, lon = get_location()
     sunrise = calculate_sunrise(lat, lon)
+    if sunrise.second > 0 or sunrise.microsecond > 0:
+        sunrise += datetime.timedelta(minutes=1)
+        sunrise = sunrise.replace(second=0, microsecond=0)
     sunrise_hour = sunrise.hour
     sunrise_minute = sunrise.minute
 
-    print(f"Today's sunrise (civil twilight): {sunrise.strftime('%H:%M')}")
-    print(f"Schedule:")
-    print(f"  {sunrise_hour:02d}:{sunrise_minute:02d} → morning")
-    print(f"  12:00 → day")
-    print(f"  19:00 → evening")
-    print(f"  23:00 → night")
-    print(f"  03:00 → recalculate schedule")
+    log(f"Today's sunrise (civil twilight): {sunrise.strftime('%H:%M')}")
+    log(f"Schedule: {sunrise_hour:02d}:{sunrise_minute:02d}→morning, "
+        f"12:00→day, 19:00→evening, 23:00→night, 03:00→recalculate")
 
     script_path = os.path.abspath(__file__)
 
+    import plistlib
     plist = {
         "Label": "com.jwright.solar-wallpaper",
         "ProgramArguments": ["/usr/bin/python3", script_path],
@@ -270,16 +415,13 @@ def write_schedule():
             {"Hour": 3, "Minute": 0},
         ],
         "RunAtLoad": True,
-        "StandardOutPath": os.path.join(SCRIPT_DIR, "solar_wallpaper.log"),
-        "StandardErrorPath": os.path.join(SCRIPT_DIR, "solar_wallpaper.log"),
+        "StandardOutPath": LOG_PATH,
+        "StandardErrorPath": LOG_PATH,
     }
 
-    import plistlib
     with open(LAUNCHD_PLIST, "wb") as f:
         plistlib.dump(plist, f)
 
-    # Reload via a detached process — unloading from within the running job
-    # would kill this process before the load can execute.
     subprocess.Popen(
         ["/bin/sh", "-c",
          f"sleep 2 && launchctl unload '{LAUNCHD_PLIST}' 2>/dev/null; "
@@ -288,67 +430,169 @@ def write_schedule():
         stdout=subprocess.DEVNULL,
         stderr=subprocess.DEVNULL,
     )
-    print(f"\nLaunch agent updated (reloading in background).")
+    log("Launch agent updated (reloading in background).")
 
 
 def main():
+    # --hard-switch: immediate jump to a period
     if "--hard-switch" in sys.argv:
         idx = sys.argv.index("--hard-switch")
         if idx + 1 < len(sys.argv):
             period = sys.argv[idx + 1]
             if period in WALLPAPERS:
                 hard_switch(period)
-                print(f"Hard-switched to {period}.")
+                log(f"Hard-switched to {period}.")
             else:
-                print(f"Unknown period: {period}", file=sys.stderr)
+                log(f"Unknown period: {period}")
                 sys.exit(1)
         return
 
+    # --schedule: just write the schedule and exit
     if "--schedule" in sys.argv:
         write_schedule()
         return
 
-    # At 3am, recalculate the schedule for today's sunrise
+    # At 3am, recalculate the schedule — but guard against the RunAtLoad loop.
+    # Only do this ONCE: check if the schedule was already written today.
     now = datetime.datetime.now()
     if now.hour == 3 and now.minute < 5:
-        write_schedule()
+        # Check if we already wrote the schedule today
+        schedule_marker = os.path.join(SCRIPT_DIR, ".schedule_date")
+        today_str = now.strftime("%Y-%m-%d")
+        last_schedule = ""
+        if os.path.exists(schedule_marker):
+            with open(schedule_marker) as f:
+                last_schedule = f.read().strip()
+        if last_schedule != today_str:
+            with open(schedule_marker, "w") as f:
+                f.write(today_str)
+            write_schedule()
         return
 
+    # Acquire lock — only one instance should be stepping through frames
+    if not acquire_lock():
+        log("Another instance is running. Exiting.")
+        return
+
+    try:
+        _do_transition()
+    finally:
+        release_lock()
+
+
+def _do_transition():
     lat, lon = get_location()
-    period = get_period(lat, lon)
+    target_period = get_period(lat, lon)
     last_period = load_last_period()
 
-    if last_period == period:
-        print(f"Already showing {period}. No change needed.")
+    # If already showing the correct period, nothing to do
+    if last_period == target_period:
+        # But check if there's an in-progress transition we should resume
+        progress = load_progress()
+        if progress and progress["to"] == target_period:
+            # There's a stalled transition — the endpoint is correct, just finalize
+            final_frame = os.path.join(FRAMES_DIR, f"{target_period}.png")
+            if os.path.exists(final_frame):
+                set_wallpaper(final_frame)
+            clear_progress()
         return
-
-    elev = solar_elevation(lat, lon)
 
     if not last_period:
-        print(f"Switched to Tahoe {period.capitalize()} (solar elevation: {elev:.1f}°)")
-        hard_switch(period)
+        log(f"First run — setting wallpaper to {target_period}")
+        hard_switch(target_period)
         return
 
-    steps = (PERIODS.index(period) - PERIODS.index(last_period)) % 4
+    # Determine how far we are from the transition start time
+    transition_start = get_transition_time(target_period, lat, lon)
+    seconds_since_start = (datetime.datetime.now() - transition_start).total_seconds()
 
-    # Determine if we're at the transition moment or catching up late.
-    if period == "morning":
-        transition_time = calculate_sunrise(lat, lon)
-    elif period == "day":
-        transition_time = now.replace(hour=12, minute=0, second=0, microsecond=0)
-    elif period == "evening":
-        transition_time = now.replace(hour=19, minute=0, second=0, microsecond=0)
+    # Are we within the normal 30-minute transition window?
+    if 0 <= seconds_since_start <= TRANSITION_DURATION:
+        # We're mid-window. Calculate which frame we should be on and
+        # start from there (handles wake mid-transition perfectly).
+        step_interval = TRANSITION_DURATION / (TRANSITION_STEPS + 1)
+        current_step = int(seconds_since_start / step_interval)
+
+        if current_step >= TRANSITION_STEPS + 1:
+            # Window is basically over — just finish
+            log(f"Transition {last_period}→{target_period} (completing)")
+            hard_switch(target_period)
+        else:
+            # Jump to the current frame, then continue stepping normally
+            log(f"Transition {last_period}→{target_period} "
+                f"(resuming at step {current_step}/{TRANSITION_STEPS})")
+            frame_path = get_transition_frame(last_period, target_period, current_step)
+            if os.path.exists(frame_path):
+                set_wallpaper(frame_path)
+
+            # Calculate remaining duration
+            remaining_seconds = TRANSITION_DURATION - seconds_since_start
+            remaining_steps = TRANSITION_STEPS + 1 - current_step
+            if remaining_steps > 0 and remaining_seconds > 0:
+                # Continue the transition for the remaining time
+                run_transition_from_step(
+                    last_period, target_period,
+                    start_step=current_step,
+                    remaining_duration=remaining_seconds,
+                )
+            else:
+                hard_switch(target_period)
     else:
-        transition_time = now.replace(hour=23, minute=0, second=0, microsecond=0)
+        # We're past the transition window (or before it, which shouldn't happen).
+        # Do a quick catch-up fade.
+        log(f"Catch-up {last_period}→{target_period} "
+            f"({seconds_since_start / 60:.0f}min past transition)")
+        run_transition(last_period, target_period, duration=CATCHUP_DURATION)
 
-    minutes_late = (now - transition_time).total_seconds() / 60.0
 
-    if steps != 1 or minutes_late > 5:
-        print(f"Catching up {last_period} → {period} ({minutes_late:.0f}min late, quick fade)")
-        run_overlay(last_period, period, duration=CATCHUP_FADE_DURATION)
-    else:
-        print(f"Transitioning {last_period} → {period} (solar elevation: {elev:.1f}°)")
-        run_overlay(last_period, period, duration=FADE_DURATION)
+def run_transition_from_step(from_period, to_period, start_step, remaining_duration):
+    """Continue a transition from a specific step over the remaining duration."""
+    if not transition_frames_exist(from_period, to_period):
+        hard_switch(to_period)
+        return
+
+    total_steps = TRANSITION_STEPS + 1
+    remaining_steps = total_steps - start_step
+    step_interval = remaining_duration / remaining_steps if remaining_steps > 0 else 0
+    start_time = datetime.datetime.now()
+
+    save_progress(from_period, to_period, start_step, start_time)
+
+    for i in range(remaining_steps):
+        step = start_step + i + 1
+        if step > total_steps:
+            break
+
+        # Wall-clock anchoring
+        elapsed = (datetime.datetime.now() - start_time).total_seconds()
+        expected_i = min(int(elapsed / step_interval), remaining_steps - 1) if step_interval > 0 else remaining_steps - 1
+        actual_i = max(i, expected_i)
+        actual_step = start_step + actual_i + 1
+
+        if actual_step > total_steps:
+            actual_step = total_steps
+
+        frame_path = get_transition_frame(from_period, to_period, actual_step)
+        if os.path.exists(frame_path):
+            set_wallpaper(frame_path)
+
+        save_progress(from_period, to_period, actual_step, start_time)
+
+        if actual_step >= total_steps:
+            break
+
+        # Sleep until next frame
+        next_time = start_time + datetime.timedelta(seconds=(actual_i + 1) * step_interval)
+        sleep_secs = (next_time - datetime.datetime.now()).total_seconds()
+        if sleep_secs > 0:
+            time.sleep(sleep_secs)
+
+    # Final
+    final_frame = os.path.join(FRAMES_DIR, f"{to_period}.png")
+    if os.path.exists(final_frame):
+        set_wallpaper(final_frame)
+    save_last_period(to_period)
+    clear_progress()
 
 
 if __name__ == "__main__":

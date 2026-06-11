@@ -4,7 +4,23 @@ Ongoing record of changes, known issues, and debugging sessions for the solar wa
 
 ## Architecture
 
-The system has two cooperating parts:
+The system uses **pre-blended frame stepping** — no overlay process, no daemon crossfades:
+
+1. **`solar_wallpaper.py`** — Scheduler + stepper. Determines the correct period, then steps through pre-rendered intermediate frames using `set_wallpaper` to call `NSWorkspace.setDesktopImageURL`. Stays alive for the 30-minute transition window, sleeping ~60s between frames. Wall-clock anchored so sleep/wake is handled naturally.
+2. **`set_wallpaper` (Swift binary)** — Calls `NSWorkspace.setDesktopImageURL` for all connected screens. This is the *only* writer of persistent wallpaper state. macOS handles login/sleep/wake/reboot natively.
+3. **`screen_watcher` (Swift daemon)** — Listens for wake/unlock/display-connect. On wake: triggers `solar_wallpaper.py` which does a rapid 5-second catch-up fade. On display connect: applies current wallpaper to all screens.
+4. **`transitions/`** — 120 pre-blended JPEG frames (30 per transition pair), generated once by `generate_frames.py`.
+
+**Scheduling:** A single `launchd` agent fires at sunrise, 12:00, 19:00, 23:00, and 03:00. `RunAtLoad` triggers on login. At 3am (guarded against repeat) it recalculates sunrise and rewrites the schedule.
+
+**Persistence:** macOS owns wallpaper persistence via `setDesktopImageURL`. No daemon, no `Index.plist` mutation, no overlay, no `killall WallpaperAgent`.
+
+---
+
+<details>
+<summary>Previous architecture (overlay-based, removed 2026-06-11)</summary>
+
+The system had two cooperating parts:
 
 1. **`solar_wallpaper.py`** — Scheduler. Determines the correct period and launches the overlay binary with from/to frames and a duration.
 2. **`crossfade_overlay` (Swift binary)** — Transient GUI process that:
@@ -125,6 +141,8 @@ The old `wake_watcher` agent is now redundant; `--install` unloads it automatica
 
 The overlay has zero mid_command — it just crossfades visually and exits. If it dies at any point, the wallpaper is already correct because `hard_switch` completed in the Python process before it exited.
 
+</details>
+
 ## Version History
 
 | Date | Change |
@@ -137,3 +155,4 @@ The overlay has zero mid_command — it just crossfades visually and exits. If i
 | 2026-06-01 | Remove overlay mid_command entirely — Python does all switching in-process |
 | 2026-06-02 | Persistent `solar_daemon` replaces transient overlay; osascript switch eliminates flash |
 | 2026-06-06 | Architectural reset: delete daemon, `NSWorkspace.setDesktopImageURL` is sole writer, macOS handles persistence natively |
+| 2026-06-11 | **Pre-blended frame stepping replaces overlay entirely.** No transient GUI process. 30 pre-rendered intermediate frames per transition, stepped via `setDesktopImageURL` at 1-min intervals. Wake catch-up is a 5-second rapid step-through. Fixed 3am infinite reload loop. |
