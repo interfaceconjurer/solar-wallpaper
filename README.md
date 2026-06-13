@@ -1,6 +1,6 @@
 # Solar Wallpaper
 
-A macOS dynamic wallpaper system that automatically transitions between Lake Tahoe aerial wallpapers based on the sun's position in the sky. Transitions are smooth and imperceptible — pre-blended intermediate frames step through at 1-minute intervals using macOS's native `NSWorkspace.setDesktopImageURL` API.
+A macOS dynamic wallpaper system that automatically transitions between Lake Tahoe aerial wallpapers based on the sun's position in the sky. Transitions are smooth real-time GPU crossfades: a borderless overlay window dissolves from the old period still to the new one at 60fps, then macOS's native `NSWorkspace.setDesktopImageURL` API persists the result.
 
 <p align="center">
   <img src="screenshots/transition-cycle.png" alt="Transition cycle — morning, day, evening, night" />
@@ -24,7 +24,7 @@ A launch agent fires the script at each transition time:
 | 7:00pm | day → evening |
 | 11:00pm | evening → night |
 
-When a transition triggers, the script steps through 30 pre-blended intermediate frames over 30 minutes (one per minute). Each step is a ~3% opacity change — imperceptible individually, smooth in aggregate. The wallpaper is set via `NSWorkspace.setDesktopImageURL`, so macOS persists it natively through sleep, login, and reboot.
+When a transition triggers, the script launches `crossfade_overlay`. The overlay covers the desktop with the *current* still (so its appearance is invisible), sets the real wallpaper to the *new* still underneath via `NSWorkspace.setDesktopImageURL`, then dissolves its own opacity 1→0 over 10 seconds. Because the wallpaper is written *before* the fade begins, macOS persists the correct image through sleep, login, and reboot even if the overlay is interrupted mid-fade. The overlay sits just above the desktop icons but below normal windows, so it never covers your apps.
 
 ### Wake / Lid-Open
 
@@ -32,19 +32,16 @@ When you open the laptop after it's been closed:
 
 1. macOS shows the **previous wallpaper** (already persisted from the last `setDesktopImageURL` call)
 2. The screen watcher daemon detects wake and triggers the script
-3. The script calculates the correct current period and does a **5-second rapid fade** from the previous wallpaper to the current one (stepping through the same intermediate frames quickly)
-
-If you wake mid-transition (e.g., the evening fade started at 19:00, you closed at 19:10, reopened at 19:20), the script calculates which frame corresponds to 19:20 and resumes from there — no jump, no flash.
+3. The script calculates the correct current period and, if it changed while asleep, crossfades from the previous wallpaper to the current one
 
 ### Why This Approach
 
-Previous iterations used a Core Animation overlay window for real-time GPU crossfades. This was fragile:
-- The overlay process could die on sleep/wake
-- It required a window server session (unavailable during wake)
-- The overlay appearing was itself a visual discontinuity
-- `setDesktopImageURL` inside the overlay fired before the crossfade rendered, causing abrupt snaps
+The overlay is self-contained and ordered to avoid the classic crossfade pitfalls:
+- It shows the **current** still first, so the window appearing is visually invisible
+- It writes the destination wallpaper **before** fading, so correctness never depends on the fade finishing — if the process is killed (e.g., sleep), macOS already has the right image
+- The fade is a continuous 60fps Core Animation opacity dissolve, eliminating the visible ~3% steps of frame-by-frame blending
 
-The pre-blended frame approach eliminates the entire class of overlay bugs. There is no transient process that can die. The script is idempotent — it always does the right thing based on wall-clock time, regardless of when or how it was launched.
+The script itself stays idempotent: it determines the correct period from wall-clock time and the sun's elevation, and only crossfades when the period has actually changed.
 
 ## Setup
 
@@ -66,11 +63,11 @@ cd ~/git-repos/solar-wallpaper
 swiftc -O -o set_wallpaper set_wallpaper.swift -framework Cocoa
 swiftc -O -o screen_watcher screen_watcher.swift -framework Cocoa
 
+# Compile the crossfade overlay
+swiftc -O -o crossfade_overlay crossfade_overlay.swift
+
 # Extract base frames from the aerial videos (first run only)
 python3 solar_wallpaper.py
-
-# Generate transition frames (~94 MB, one-time)
-python3 generate_frames.py
 
 # Calculate sunrise and install the launch agent schedule
 python3 solar_wallpaper.py --schedule
@@ -98,9 +95,6 @@ python3 solar_wallpaper.py --hard-switch morning
 
 # Recalculate sunrise and update the launchd schedule
 python3 solar_wallpaper.py --schedule
-
-# Regenerate transition frames (after changing STEPS or quality)
-python3 generate_frames.py
 ```
 
 ## Architecture
@@ -117,17 +111,19 @@ python3 generate_frames.py
 │ solar_wallpaper.py                                        │
 │ • Determines current period from sun elevation / clock    │
 │ • Reads .last_period to know what's currently displayed   │
-│ • Steps through transitions/X_to_Y/00-29.jpg frames      │
-│ • Calls set_wallpaper binary for each frame               │
-│ • Wall-clock anchored: handles sleep/resume naturally     │
+│ • Crossfades old→new when the period changed              │
 └────────────────────────┬─────────────────────────────────┘
-                         │ subprocess
+              subprocess  │  (from, to, duration)
                          ▼
 ┌──────────────────────────────────────────────────────────┐
-│ set_wallpaper (Swift binary)                              │
-│ • Calls NSWorkspace.setDesktopImageURL for all screens    │
-│ • macOS persists this through sleep/login/reboot          │
+│ crossfade_overlay (Swift GUI binary)                      │
+│ • Covers desktop with the FROM still (invisible appear)   │
+│ • Sets wallpaper to TO still via setDesktopImageURL       │
+│ • Dissolves window opacity 1→0 over 10s at 60fps          │
+│ • macOS persists the TO still through sleep/login/reboot  │
 └──────────────────────────────────────────────────────────┘
+
+( set_wallpaper is still used for hard switches and hotplug )
 
 ┌──────────────────────────────────────────────────────────┐
 │ screen_watcher (Swift daemon, launchd KeepAlive)          │
@@ -142,12 +138,10 @@ python3 generate_frames.py
 
 | File | Purpose |
 |------|---------|
-| `solar_wallpaper.py` | Main script — determines period, steps through frames |
-| `set_wallpaper.swift` | Minimal binary to call `setDesktopImageURL` |
+| `solar_wallpaper.py` | Main script — determines period, runs crossfades |
+| `crossfade_overlay.swift` | GPU crossfade overlay window (the transition) |
+| `set_wallpaper.swift` | Minimal binary to call `setDesktopImageURL` (hard switch / hotplug) |
 | `screen_watcher.swift` | Wake/display-connect daemon |
-| `generate_frames.py` | Pre-renders blended transition frames |
-
-| `frames/` | Base t=0 PNG frames from each aerial video |
-| `transitions/` | Pre-blended intermediate JPEG frames |
+| `frames/` | Base PNG stills (extracted ~30s into each aerial video) |
 | `config.json` | Latitude/longitude (auto-generated) |
 | `.last_period` | Current period state file |

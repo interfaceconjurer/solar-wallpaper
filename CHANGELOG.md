@@ -4,16 +4,17 @@ Ongoing record of changes, known issues, and debugging sessions for the solar wa
 
 ## Architecture
 
-The system uses **pre-blended frame stepping** — no overlay process, no daemon crossfades:
+The system uses a **self-contained GPU crossfade overlay** for smooth transitions:
 
-1. **`solar_wallpaper.py`** — Scheduler + stepper. Determines the correct period, then steps through pre-rendered intermediate frames using `set_wallpaper` to call `NSWorkspace.setDesktopImageURL`. Stays alive for the 30-minute transition window, sleeping ~60s between frames. Wall-clock anchored so sleep/wake is handled naturally.
-2. **`set_wallpaper` (Swift binary)** — Calls `NSWorkspace.setDesktopImageURL` for all connected screens. This is the *only* writer of persistent wallpaper state. macOS handles login/sleep/wake/reboot natively.
-3. **`screen_watcher` (Swift daemon)** — Listens for wake/unlock/display-connect. On wake: triggers `solar_wallpaper.py` which does a rapid 5-second catch-up fade. On display connect: applies current wallpaper to all screens.
-4. **`transitions/`** — 120 pre-blended JPEG frames (30 per transition pair), generated once by `generate_frames.py`.
+1. **`solar_wallpaper.py`** — Scheduler. Determines the correct period, reads `.last_period`, and when the period has changed launches `crossfade_overlay` with the from/to stills and a duration (`CROSSFADE_DURATION`, default 10s). Stays idempotent: only acts when the period actually changed.
+2. **`crossfade_overlay` (Swift GUI binary)** — The transition. Covers every display with the *from* still (so its appearance is invisible), sets the real wallpaper to the *to* still via `NSWorkspace.setDesktopImageURL` underneath, then dissolves window opacity 1→0 over the duration at 60fps. Because the wallpaper is written *before* the fade, correctness survives the process being killed mid-fade (e.g., sleep).
+3. **`set_wallpaper` (Swift binary)** — Calls `NSWorkspace.setDesktopImageURL` for all connected screens. Used for hard switches and display hotplug. macOS handles login/sleep/wake/reboot persistence natively.
+4. **`screen_watcher` (Swift daemon)** — Listens for wake/unlock/display-connect. On wake: triggers `solar_wallpaper.py` (which crossfades if the period changed while asleep). On display connect: applies current wallpaper to all screens.
+5. **`frames/`** — Four base period stills, extracted ~30s into each aerial video (`FRAME_EXTRACT_OFFSET`), where the foreground rock has panned fully into the bottom-right and all four videos line up.
 
 **Scheduling:** A single `launchd` agent fires at sunrise, 12:00, 19:00, 23:00, and 03:00. `RunAtLoad` triggers on login. At 3am (guarded against repeat) it recalculates sunrise and rewrites the schedule.
 
-**Persistence:** macOS owns wallpaper persistence via `setDesktopImageURL`. No daemon, no `Index.plist` mutation, no overlay, no `killall WallpaperAgent`.
+**Persistence:** macOS owns wallpaper persistence via `setDesktopImageURL`. No `Index.plist` mutation, no `killall WallpaperAgent`. The overlay is transient and only handles the visual fade — the persisted wallpaper is always written before the fade starts.
 
 ---
 
@@ -36,6 +37,13 @@ The system had two cooperating parts:
 **Display hotplug:** A second `launchd` agent (`com.jwright.solar-wallpaper-watcher`) keeps `screen_watcher` alive. It only acts when the screen count *increases* — applying the current period's wallpaper to all screens so newly connected displays don't show a stale image.
 
 **Persistence:** macOS itself owns wallpaper persistence — `setDesktopImageURL` writes through to the wallpaper config, so the correct wallpaper survives login, sleep/wake, and reboot natively. No `Index.plist` mutation, no `killall WallpaperAgent`, no wake watcher.
+
+## 2026-06-13 — Returned to GPU crossfade overlay; fixed still extraction offset
+
+- **Still extraction was at `-ss 0`** (start of video, no foreground rock). The good base frames had been re-extracted at **30s** in a prior session but `ensure_frame()` still hardcoded `0`, and the live wallpaper was pointing at a stale `/tmp` test file — so the desktop showed no foreground rock. Added `FRAME_EXTRACT_OFFSET = 30` and wired `ensure_frame()` to it; re-applied the correct still.
+- **Frame stepping was visibly jumpy** (one `setDesktopImageURL` per ~60s = discrete ~3% opacity steps). Replaced it with a self-contained `crossfade_overlay` that does a continuous 60fps opacity dissolve. The overlay now sets the destination wallpaper itself (after its window is on-screen, before fading), eliminating the destination-flash race the old overlay had.
+- Removed the frame-stepping machinery from `solar_wallpaper.py`: progress files, wall-clock resume, the 30-minute window, and the `transitions/` dependency. `CROSSFADE_DURATION` (default 10s) governs both scheduled and wake transitions.
+- **Deleted the dead weight:** removed `generate_frames.py` and the 92 MB `transitions/` directory (both obsolete now that the overlay blends live), and dropped their `.gitignore` entries. Added the compiled `crossfade_overlay` binary to `.gitignore` (source `crossfade_overlay.swift` is tracked).
 
 ## Known Issues & Fixes
 

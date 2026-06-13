@@ -3,10 +3,9 @@ __pycache__/
 config.json
 solar_wallpaper.log
 frames/
-transitions/
 set_wallpaper
 screen_watcher
+crossfade_overlay
 .last_period
-.transition_progress
 .solar_lock
 .schedule_date
