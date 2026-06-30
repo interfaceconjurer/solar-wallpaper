@@ -103,25 +103,59 @@ def release_lock():
         pass
 
 
-def get_location():
+def _read_cached_location():
+    """Return (lat, lon) from config.json if present, else None."""
     if os.path.exists(CONFIG_PATH):
-        with open(CONFIG_PATH) as f:
-            config = json.load(f)
-        if "latitude" in config and "longitude" in config:
-            return config["latitude"], config["longitude"]
+        try:
+            with open(CONFIG_PATH) as f:
+                config = json.load(f)
+            if "latitude" in config and "longitude" in config:
+                return config["latitude"], config["longitude"]
+        except Exception:
+            pass
+    return None
+
+
+def _detect_location_via_ip():
+    """Detect (lat, lon) from IP geolocation. Raises on failure."""
+    req = urllib.request.Request(
+        "https://ipapi.co/json/",
+        headers={"User-Agent": "solar-wallpaper/1.0"},
+    )
+    with urllib.request.urlopen(req, timeout=5) as resp:
+        data = json.loads(resp.read())
+    return data["latitude"], data["longitude"]
+
+
+def get_location(refresh=False):
+    """Determine the current location.
+
+    config.json is treated as a *cache*, not a hardcoded setting. By default
+    (normal transitions and wake events) the cache is used so transitions are
+    fast and work offline. When refresh=True — done during the daily 3am
+    schedule recalc — the location is re-detected via IP geolocation so the
+    wallpaper follows you as you travel, and the cache is updated. If detection
+    fails (offline), the cached location is used as a fallback.
+    """
+    cached = _read_cached_location()
+
+    if cached is not None and not refresh:
+        return cached
 
     try:
-        req = urllib.request.Request(
-            "https://ipapi.co/json/",
-            headers={"User-Agent": "solar-wallpaper/1.0"},
-        )
-        with urllib.request.urlopen(req, timeout=5) as resp:
-            data = json.loads(resp.read())
-        lat, lon = data["latitude"], data["longitude"]
+        lat, lon = _detect_location_via_ip()
         with open(CONFIG_PATH, "w") as f:
             json.dump({"latitude": lat, "longitude": lon}, f, indent=2)
+        if cached is None:
+            log(f"Location detected via IP: lat={lat:.4f}, lon={lon:.4f}")
+        elif (lat, lon) != cached:
+            log(f"Location changed via IP: lat={lat:.4f}, lon={lon:.4f} "
+                f"(was {cached[0]:.4f}, {cached[1]:.4f})")
         return lat, lon
     except Exception as e:
+        if cached is not None:
+            log(f"Location refresh failed ({e}); using cached location.")
+            return cached
         log(f"Could not determine location: {e}")
         sys.exit(1)
 
@@ -189,14 +223,19 @@ def get_period(lat, lon):
     elev = solar_elevation(lat, lon, now_utc)
     sun_is_up = elev >= -6
 
+    # Night runs from 23:00 until sunrise. Boundaries match the launchd
+    # schedule (sunrise→morning, 12:00→day, 19:00→evening, 23:00→night).
     if local_hour >= 23:
         return "night"
-    if not sun_is_up:
-        return "night"
     if local_hour < 12:
-        return "morning"
+        # Morning only once the sun has actually risen (civil twilight);
+        # before that it is still night.
+        return "morning" if sun_is_up else "night"
     if local_hour < 19:
         return "day"
+    # 19:00–23:00 is always evening, even after the sun has set for the day.
+    # (Previously a blanket `not sun_is_up` check forced night at dusk,
+    # switching to night ~2 hours early in summer.)
     return "evening"
 
 
@@ -296,7 +335,9 @@ def hard_switch(period):
 
 def write_schedule():
     """Calculate today's sunrise and write the launchd plist."""
-    lat, lon = get_location()
+    # Re-detect location during the daily recalc so the schedule follows you
+    # as you travel; falls back to the cached location if offline.
+    lat, lon = get_location(refresh=True)
     sunrise = calculate_sunrise(lat, lon)
     if sunrise.second > 0 or sunrise.microsecond > 0:
         sunrise += datetime.timedelta(minutes=1)
