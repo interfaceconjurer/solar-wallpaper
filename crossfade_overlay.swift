@@ -22,7 +22,13 @@ guard CommandLine.arguments.count >= 4 else {
 
 let fromPath = CommandLine.arguments[1]
 let toPath = CommandLine.arguments[2]
-let duration = Double(CommandLine.arguments[3]) ?? 1.0
+// The duration arg also accepts the literal "hold": instead of fading out and
+// exiting, the overlay stays fully visible on top of the freshly-set
+// destination wallpaper so scaling/alignment can be inspected statically.
+// Used by test_crossfade.sh. Ctrl-C in the terminal exits.
+let durationArg = CommandLine.arguments[3]
+let holdMode = durationArg.lowercased() == "hold"
+let duration = Double(durationArg) ?? 1.0
 
 guard FileManager.default.fileExists(atPath: fromPath) else {
     fputs("Error: from image not found: \(fromPath)\n", stderr)
@@ -37,13 +43,23 @@ guard let fromImage = NSImage(contentsOfFile: fromPath) else {
     exit(1)
 }
 
+// Rasterize to a CGImage so the overlay can be driven by a CALayer using
+// aspect-FILL gravity (see below). NSImageView has no crop-to-fill scaling
+// mode, so we render the layer's contents directly.
+var fromImageRect = NSRect(origin: .zero, size: fromImage.size)
+guard let fromCGImage = fromImage.cgImage(forProposedRect: &fromImageRect, context: nil, hints: nil) else {
+    fputs("Error: could not rasterize from image\n", stderr)
+    exit(1)
+}
+
 let toURL = URL(fileURLWithPath: toPath)
 
 class OverlayDelegate: NSObject, NSApplicationDelegate {
     var windows: [NSWindow] = []
-    var sourceImage: NSImage!
+    var sourceImage: CGImage!
     var destURL: URL!
     var fadeDuration: Double = 1.0
+    var hold: Bool = false
 
     func applicationDidFinishLaunching(_ notification: Notification) {
         NSApp.setActivationPolicy(.accessory)
@@ -63,22 +79,68 @@ class OverlayDelegate: NSObject, NSApplicationDelegate {
             window.ignoresMouseEvents = true
             window.hasShadow = false
 
-            // Image view that fills the screen exactly like macOS wallpaper does
-            let imageView = NSImageView(frame: NSRect(origin: .zero, size: screen.frame.size))
-            imageView.image = sourceImage
-            imageView.imageScaling = .scaleProportionallyUpOrDown
-            imageView.imageAlignment = .alignCenter
-            window.contentView = imageView
+            // Fill the screen exactly like macOS wallpaper does: aspect-FILL
+            // (scale to cover, crop the overflow), NOT aspect-fit. A 16:9 still
+            // on a taller display (e.g. 3456x2234) would otherwise be
+            // letterboxed with black bars top/bottom, so the overlay would not
+            // line up with the full-bleed wallpaper underneath it. NSImageView
+            // has no crop-to-fill mode, so drive a CALayer directly.
+            let contentView = NSView(frame: NSRect(origin: .zero, size: screen.frame.size))
+            contentView.wantsLayer = true
+            let layer = contentView.layer!
+            layer.contents = sourceImage
+            layer.contentsGravity = .resizeAspectFill
+            layer.contentsScale = screen.backingScaleFactor
+            layer.masksToBounds = true
+            layer.backgroundColor = NSColor.black.cgColor
+            window.contentView = contentView
 
             window.orderFrontRegardless()
             windows.append(window)
         }
 
-        // Wait for the windows to actually render before touching the wallpaper
-        DispatchQueue.main.asyncAfter(deadline: .now() + 0.08) {
+        // Force the overlay windows to draw immediately, then only touch the
+        // REAL wallpaper once the window server has actually presented the
+        // overlay frame on screen. A fixed delay races on busy systems and
+        // external displays: the destination wallpaper gets written before the
+        // overlay is composited, briefly exposing it (visible morning→day jump),
+        // then the overlay pops on top (day→morning jump) before the fade.
+        for window in windows {
+            window.displayIfNeeded()
+        }
+
+        var didProceed = false
+        let proceed = { [weak self] in
+            guard let self = self, !didProceed else { return }
+            didProceed = true
             self.setDestinationWallpaper()
+            if self.hold {
+                // Freeze: keep the overlay fully opaque over the destination
+                // wallpaper so any aspect-ratio mismatch is static and
+                // inspectable. Terminal Ctrl-C exits.
+                fputs("Holding overlay for inspection. Press Ctrl-C to exit.\n", stderr)
+                return
+            }
             self.startFade()
         }
+
+        // Primary path: the CATransaction completion block fires after the
+        // overlay layers are committed and presented by the render server. One
+        // extra runloop hop guarantees the frame is on screen before we swap the
+        // wallpaper underneath it.
+        CATransaction.begin()
+        CATransaction.setCompletionBlock {
+            DispatchQueue.main.async(execute: proceed)
+        }
+        for window in windows {
+            window.contentView?.layer?.setNeedsDisplay()
+            window.displayIfNeeded()
+        }
+        CATransaction.commit()
+
+        // Safety fallback: if no completion fires (e.g. nothing to commit),
+        // proceed anyway so a transition never stalls.
+        DispatchQueue.main.asyncAfter(deadline: .now() + 0.5, execute: proceed)
     }
 
     func setDestinationWallpaper() {
@@ -113,8 +175,9 @@ class OverlayDelegate: NSObject, NSApplicationDelegate {
 
 let app = NSApplication.shared
 let delegate = OverlayDelegate()
-delegate.sourceImage = fromImage
+delegate.sourceImage = fromCGImage
 delegate.destURL = toURL
 delegate.fadeDuration = duration
+delegate.hold = holdMode
 app.delegate = delegate
 app.run()
