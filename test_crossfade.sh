@@ -7,11 +7,11 @@
 # verified. Your current wallpaper state (.last_period) is restored on exit.
 #
 # Usage:
-#   ./test_crossfade.sh align [period]           Park the overlay (aspect-fit)
+#   ./test_crossfade.sh align [period]           Park the overlay (aspect-fill)
 #                                                on top of the SAME image set as
-#                                                the real wallpaper (aspect-fill)
-#                                                and hold it, so any black bars /
-#                                                misalignment are static and
+#                                                the real wallpaper (fill screen)
+#                                                and hold it, so any entrance pulse
+#                                                or static misalignment is directly
 #                                                inspectable. Ctrl-C to exit.
 #                                                (default period: night)
 #
@@ -72,10 +72,10 @@ case "$cmd" in
     require_frame "$period"
     build
     echo "ALIGN TEST"
-    echo "  overlay  = $period  (overlay's scaling: aspect-fit)"
-    echo "  wallpaper= $period  (macOS scaling: aspect-fill)"
-    echo "Same image both layers. If scaling matches -> ONE seamless image."
-    echo "Black bars or a larger image peeking past the overlay = the mismatch."
+    echo "  overlay  = $period  (CALayer scaling: aspect-fill)"
+    echo "  wallpaper= $period  (macOS scaling: fill screen)"
+    echo "Same image both layers. It should appear as ONE seamless image."
+    echo "Any entrance pulse or static edge shift reveals a mismatch."
     echo ""
     _touched=1
     "$BIN" "$(frame "$period")" "$(frame "$period")" hold

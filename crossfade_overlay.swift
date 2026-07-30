@@ -78,6 +78,10 @@ class OverlayDelegate: NSObject, NSApplicationDelegate {
             window.collectionBehavior = [.canJoinAllSpaces, .stationary, .ignoresCycle]
             window.ignoresMouseEvents = true
             window.hasShadow = false
+            // A transient borderless window inherits AppKit's default entrance
+            // animation, which briefly scales the otherwise-identical source
+            // image before our opacity crossfade begins.
+            window.animationBehavior = .none
 
             // Fill the screen exactly like macOS wallpaper does: aspect-FILL
             // (scale to cover, crop the overflow), NOT aspect-fit. A 16:9 still

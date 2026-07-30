@@ -18,6 +18,13 @@ The system uses a **self-contained GPU crossfade overlay** for smooth transition
 
 ---
 
+## 2026-07-30 — Removed the pre-crossfade scale pulse
+
+- **Problem:** Immediately before the intended opacity crossfade, the current wallpaper briefly appeared to scale or jump. A same-image `day → day` hold test reproduced the pulse without changing image content, isolating it from frame registration and crop differences.
+- **Cause:** The transient borderless overlay window inherited AppKit's default entrance animation. Ordering the window on-screen animated the otherwise-identical source image before the explicit wallpaper fade began.
+- **Fix:** Set `window.animationBehavior = .none` before `orderFrontRegardless()`. This suppresses only AppKit's automatic window entrance effect; the explicit `NSAnimationContext` alpha crossfade remains unchanged.
+- **Verification:** Rebuilt and type-checked the Swift overlay; two same-image hold tests showed no pulse, and a live `day → evening → day` cycle was visually confirmed seamless.
+
 <details>
 <summary>Previous architecture (overlay-based, removed 2026-06-11)</summary>
 
